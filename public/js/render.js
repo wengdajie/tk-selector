@@ -62,6 +62,12 @@ export const qcFlags = v => String(v.qc_flags || '').split(',').filter(Boolean);
 
 export function qcBadges(v) {
   const rows = [];
+  if (v.score_content != null) {
+    rows.push(el('span', {
+      class: 'flag ' + (v.score_content >= 80 ? 'ok' : 'plain'),
+      title: `内容综合分 ${v.score_content}（5 个维度均分 ×10）`,
+    }, `内容 ${v.score_content}`));
+  }
   if (v.qc_status === 'done' && v.qc_score != null && v.qc_score < 80) {
     const labels = qcFlags(v).map(f => QC_LABELS[f] || f);
     rows.push(el('span', {

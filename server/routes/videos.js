@@ -9,8 +9,17 @@ const media = require('../lib/media');
 const { ingest } = require('../lib/store');
 const { requireUser } = require('../middleware');
 const { uuid, ymd, safeName } = require('../lib/util');
+const { STAGES, STAGE_KEYS, DIMS, normalizeScores, contentScore, normStage } = require('../lib/scoring');
 
 const r = express.Router();
+
+const safeParseScores = s => {
+  if (!s) return {};
+  if (typeof s === 'object') return s;
+  try { return JSON.parse(s); } catch { return {}; }
+};
+/** 对外统一把 scores 序列化成对象，避免调用方再解析字符串 */
+const shape = v => (v ? { ...v, scores: safeParseScores(v.scores) } : v);
 
 const tmpDir = path.join(config.dataDir, 'tmp');
 fs.mkdirSync(tmpDir, { recursive: true });
@@ -63,6 +72,8 @@ function buildFilter(qs) {
   if (qs.qc === 'ok') add('(v.qc_status = \'done\' AND v.qc_score >= 80)', 'qcOk', 1);
   if (qs.qc === 'pending') add("v.qc_status = 'pending'", 'qcPend', 1);
   if (qs.similar === '1') add('v.sim_of IS NOT NULL', 'sim', 1);
+  if (qs.stage && STAGE_KEYS.includes(qs.stage)) add('v.stage = @stage', 'stage', qs.stage);
+  if (qs.scored === '1') add('v.score_content IS NOT NULL', 'scored', 1);
 
   return { clause: where.length ? `WHERE ${where.join(' AND ')}` : '', params: p };
 }
@@ -109,7 +120,7 @@ r.get('/videos', requireUser, (req, res) => {
   const tags = [...tagCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 24)
     .map(([name, count]) => ({ name, count }));
 
-  res.json({ items, total, limit, offset, dates, tags });
+  res.json({ items: items.map(shape), total, limit, offset, dates, tags });
 });
 
 r.get('/videos/:id', requireUser, (req, res) => {
@@ -135,7 +146,7 @@ r.get('/videos/:id', requireUser, (req, res) => {
     WHERE id = ? OR sim_of = ?
     ORDER BY (id = ?) DESC LIMIT 6
   `).all(v.sim_of || '', v.id, v.sim_of || '');
-  res.json({ video: v, comments, downloads, siblings, similar });
+  res.json({ video: shape(v), comments, downloads, siblings, similar });
 });
 
 r.get('/videos/:id/stream', requireUser, (req, res) => {
@@ -206,6 +217,12 @@ r.patch('/videos/:id', requireUser, (req, res) => {
   const b = req.body || {};
   const ratingGiven = b.rating !== undefined && b.rating !== null && b.rating !== '';
   const rating = ratingGiven ? Math.max(0, Math.min(5, Math.round(Number(b.rating) || 0))) : v.rating;
+  const stage = normStage(b.stage) || v.stage || 'new';
+  const scoresGiven = b.scores !== undefined;
+  const scores = scoresGiven
+    ? { ...safeParseScores(v.scores), ...normalizeScores(b.scores) }
+    : safeParseScores(v.scores);
+  const content = contentScore(scores);
   const next = {
     title: b.title !== undefined ? String(b.title).slice(0, 120) : v.title,
     status: ['new', 'picked', 'archived'].includes(b.status) ? b.status : v.status,
@@ -217,11 +234,15 @@ r.patch('/videos/:id', requireUser, (req, res) => {
     space: b.space === 'library' || b.space === 'daily' ? b.space : v.space,
     rating,
     rated_by: ratingGiven ? (rating > 0 ? req.user.id : null) : v.rated_by,
+    stage,
+    scores: Object.keys(scores).length ? JSON.stringify(scores) : '',
+    score_content: content,
   };
   db.prepare(`UPDATE videos SET title=@title,status=@status,tags=@tags,request_id=@request_id,
-    shoot_date=@shoot_date,space=@space,rating=@rating,rated_by=@rated_by,updated_at=@updated_at WHERE id=@id`)
+    shoot_date=@shoot_date,space=@space,rating=@rating,rated_by=@rated_by,
+    stage=@stage,scores=@scores,score_content=@score_content,updated_at=@updated_at WHERE id=@id`)
     .run({ ...next, updated_at: Date.now(), id: v.id });
-  res.json({ video: db.prepare(`${LIST_SELECT} WHERE v.id = ?`).get(v.id) });
+  res.json({ video: shape(db.prepare(`${LIST_SELECT} WHERE v.id = ?`).get(v.id)) });
 });
 
 r.delete('/videos/:id', requireUser, (req, res) => {
@@ -321,6 +342,68 @@ r.get('/export.csv', requireUser, (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="tk-selection-${ymd()}.csv"; filename*=UTF-8''${encodeURIComponent(name)}`);
   res.send(csv);
+});
+
+/** 选片流水线：各阶段数量、转化率、各维度均分 */
+r.get('/pipeline', requireUser, (req, res) => {
+  const space = req.query.space;
+  const where = space === 'library' || space === 'daily' ? 'WHERE v.space = @space' : '';
+  const params = where ? { space } : {};
+
+  const counts = {};
+  for (const row of db.prepare(`SELECT v.stage AS s, COUNT(*) c FROM videos v ${where} GROUP BY v.stage`).all(params)) {
+    counts[row.s] = row.c;
+  }
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  const stages = STAGES.map(s => ({
+    key: s.key,
+    label: s.label,
+    hint: s.hint,
+    count: counts[s.key] || 0,
+    pct: total ? Math.round((counts[s.key] || 0) / total * 100) : 0,
+  }));
+
+  // 通过率：定稿 / 已评审（排除新入库）
+  const reviewed = total - (counts.new || 0);
+  const passRate = reviewed > 0 ? Math.round((counts.final || 0) / reviewed * 100) : 0;
+
+  const dims = DIMS.map(d => {
+    const rows = db.prepare(
+      `SELECT v.scores FROM videos v ${where ? where + ' AND' : 'WHERE'} v.scores <> ''`
+    ).all(params);
+    const vals = [];
+    for (const row of rows) {
+      const sc = safeParseScores(row.scores);
+      if (Number.isFinite(Number(sc[d.key])) && Number(sc[d.key]) > 0) vals.push(Number(sc[d.key]));
+    }
+    return {
+      key: d.key,
+      label: d.label,
+      hint: d.hint,
+      avg: vals.length ? Number((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1)) : null,
+      count: vals.length,
+    };
+  });
+
+  const scored = db.prepare(
+    `SELECT COUNT(*) c FROM videos v ${where ? where + ' AND' : 'WHERE'} v.score_content IS NOT NULL`
+  ).get(params).c;
+
+  res.json({ total, stages, passRate, scored, dims });
+});
+
+/** 批量改阶段 */
+r.post('/videos/bulk-stage', requireUser, (req, res) => {
+  const ids = (req.body?.ids || []).filter(Boolean);
+  const stage = normStage(req.body?.stage);
+  if (!ids.length) return res.status(400).json({ error: '未选择视频' });
+  if (!stage) return res.status(400).json({ error: '阶段不合法' });
+  const stmt = db.prepare('UPDATE videos SET stage = ?, updated_at = ? WHERE id = ?');
+  const now = Date.now();
+  const tx = db.transaction(() => ids.forEach(id => stmt.run(stage, now, id)));
+  tx();
+  res.json({ ok: true, count: ids.length, stage });
 });
 
 module.exports = r;

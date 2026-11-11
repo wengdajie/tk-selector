@@ -125,6 +125,10 @@ const migrations = [
   ['videos', 'phash', 'ALTER TABLE videos ADD COLUMN phash TEXT'],
   ['videos', 'sim_of', 'ALTER TABLE videos ADD COLUMN sim_of TEXT'],
   ['videos', 'sim_dist', 'ALTER TABLE videos ADD COLUMN sim_dist INTEGER'],
+  // ---- v1.4：选片流水线（阶段）+ 分维度评分 ----
+  ['videos', 'stage', "ALTER TABLE videos ADD COLUMN stage TEXT NOT NULL DEFAULT 'new'"],
+  ['videos', 'scores', "ALTER TABLE videos ADD COLUMN scores TEXT NOT NULL DEFAULT ''"],
+  ['videos', 'score_content', 'ALTER TABLE videos ADD COLUMN score_content INTEGER'],
 ];
 for (const [table, col, sql] of migrations) {
   if (!hasColumn(table, col)) {
@@ -171,5 +175,13 @@ function ensureLegacyPasswords() {
 
 ensureAdmin();
 ensureLegacyPasswords();
+
+// 兼容老数据：以前「已选」的素材视为进入复选阶段
+try {
+  const moved = db.prepare(
+    "UPDATE videos SET stage = 'shortlisted' WHERE status = 'picked' AND stage = 'new'"
+  ).run();
+  if (moved.changes) console.log(`[db] ${moved.changes} 条已选素材迁移到「复选」阶段`);
+} catch { /* ignore */ }
 
 module.exports = db;

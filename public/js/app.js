@@ -51,6 +51,8 @@ const S = {
   to: '',
   q: '',
   filter: 'all',        // all | new | notDownloaded | picked | hasComments | starred | star4 | star5
+  stage: '',
+  pipeline: null,
   tag: '',
   sort: 'newest',
   layout: 'grid',
@@ -76,6 +78,30 @@ const VIEW_META = {
   requests: { title: '视频需求', sub: '运营发需求，拍摄认领交付' },
   records: { title: '下载记录', sub: '谁在什么时候拿走了哪条素材' },
   members: { title: '成员', sub: '团队账号与分工' },
+};
+
+/* 选片流水线：与 server/lib/scoring.js 保持一致 */
+const STAGES = [
+  { key: 'new', label: '新入库' },
+  { key: 'screened', label: '初筛' },
+  { key: 'shortlisted', label: '复选' },
+  { key: 'final', label: '定稿' },
+  { key: 'rejected', label: '淘汰' },
+];
+
+const DIMS = [
+  { key: 'hook', label: '前 3 秒钩子', hint: '开场能不能抓住人' },
+  { key: 'visual', label: '画面质感', hint: '构图、光线、清晰度' },
+  { key: 'point', label: '卖点清晰', hint: '产品卖点是否一眼看懂' },
+  { key: 'pace', label: '节奏', hint: '信息密度、是否拖沓' },
+  { key: 'compliance', label: '合规口播', hint: '无极限词、无误导表述' },
+];
+
+const stageLabel = k => STAGES.find(s => s.key === k)?.label || k;
+const parseScores = s => {
+  if (!s) return {};
+  if (typeof s === 'object') return s;
+  try { return JSON.parse(s); } catch { return {}; }
 };
 
 /* ========================= 启动 ========================= */
@@ -343,6 +369,7 @@ function renderToolbar() {
   bar.innerHTML = '';
   if (S.view === 'daily' || S.view === 'library') {
     if (S.view === 'daily') bar.append(renderDateBar());
+    bar.append(renderStageBar());
     bar.append(renderFilterBar());
   }
   if (S.view === 'requests') bar.append(renderReqFilter());
@@ -533,6 +560,37 @@ function renderReqFilter() {
   return bar;
 }
 
+function renderStageBar() {
+  const wrap = el('div', { class: 'stagebar' });
+  wrap.append(el('span', { class: 'mini-lbl', style: { alignSelf: 'center', marginRight: '2px' } }, '阶段'));
+  const counts = new Map((S.pipeline?.stages || []).map(s => [s.key, s.count]));
+  const total = S.pipeline?.total ?? 0;
+
+  wrap.append(el('button', {
+    class: 'stagechip' + (S.stage === '' ? ' on' : ''),
+    onclick: () => { S.stage = ''; renderToolbar(); reload(); },
+  },
+    el('b', {}, '全部'),
+    el('span', {}, `${total} 条`),
+  ));
+
+  for (const s of STAGES) {
+    const n = counts.get(s.key) || 0;
+    wrap.append(el('button', {
+      class: `stagechip st-${s.key}` + (S.stage === s.key ? ' on' : ''),
+      onclick: () => {
+        S.stage = S.stage === s.key ? '' : s.key;
+        renderToolbar();
+        reload();
+      },
+    },
+      el('b', {}, s.label),
+      el('span', {}, `${n} 条`),
+    ));
+  }
+  return wrap;
+}
+
 /* ========================= 数据加载 ========================= */
 async function reload() {
   if (S.view === 'dashboard') await loadDashboard();
@@ -546,8 +604,12 @@ async function reload() {
 async function loadDashboard() {
   $('#view').replaceChildren(skeleton(6));
   try {
-    const d = await api('/dashboard?days=14');
+    const [d, pipe] = await Promise.all([
+      api('/dashboard?days=14'),
+      api('/pipeline').catch(() => null),
+    ]);
     S.dash = d;
+    if (pipe) S.pipeline = pipe;
     if (S.view === 'dashboard') renderDashboard(d);
   } catch (e) {
     $('#view').replaceChildren(emptyState({ icon: '!', title: '仪表盘加载失败', message: e.message }));
@@ -581,6 +643,59 @@ function panel(title, sub, body, extra = null) {
     ),
     body,
   );
+}
+
+/** 选片流水线漏斗 */
+function pipelinePanel() {
+  const p = S.pipeline;
+  if (!p) return panel('选片流水线', '', emptyState({ icon: '◇', title: '暂无数据', message: '素材入库后会自动进入流水线' }));
+  const scale = Math.max(1, p.total);
+  const body = el('div', {},
+    el('div', { class: 'qc-head' },
+      el('div', { class: 'qc-score ' + (p.passRate >= 50 ? 'good' : p.passRate >= 25 ? 'mid' : 'bad') }, String(p.passRate)),
+      el('div', { style: { flex: 1, minWidth: 0 } },
+        el('div', { class: 'qc-title' }, `通过率 ${p.passRate}%`),
+        el('div', { class: 'qc-sub' }, `已评审 ${Math.max(0, reviewed)} 条 · 定稿 ${finals} 条 · 共 ${p.total} 条`),
+      ),
+      el('button', { class: 'btn btn-ghost sm', onclick: () => switchView('daily') }, '去选片 →'),
+    ),
+    el('div', { class: 'dist' },
+      ...p.stages.map(s => el('div', { class: 'dist-row' },
+        el('span', { style: { fontSize: '11px' } }, s.label),
+        el('div', { class: 'dist-bar' },
+          el('i', {
+            style: {
+              width: Math.max(2, Math.round(s.count / scale * 100)) + '%',
+              ...(s.key === 'rejected' ? { background: 'var(--danger)' } : {}),
+            },
+          })),
+        el('span', { class: 'dist-num' }, String(s.count)),
+      )),
+    ),
+  );
+  return panel('选片流水线', `已评分 ${p.scored} 条`, body);
+}
+
+/** 各维度均分 */
+function dimsPanel() {
+  const p = S.pipeline;
+  const has = p && p.dims && p.dims.some(d => d.avg != null);
+  const body = has
+    ? el('div', { class: 'dist dims' },
+        ...p.dims.map(d => el('div', { class: 'dist-row' },
+          el('span', { style: { fontSize: '11px' }, title: d.hint }, d.label),
+          el('div', { class: 'dist-bar' },
+            el('i', {
+              style: {
+                width: Math.max(2, Math.round((d.avg || 0) / 10 * 100)) + '%',
+                background: 'linear-gradient(90deg, var(--brand), var(--brand-2))',
+              },
+            })),
+          el('span', { class: 'dist-num' }, d.avg == null ? '—' : String(d.avg)),
+        )),
+      )
+    : emptyState({ icon: '★', title: '还没有维度评分', message: '打开素材详情，拖动 5 个滑块打分，这里会显示各维度均分' });
+  return panel('内容评分维度', '0-10 分，看清团队短板', body);
 }
 
 function renderDashboard(d) {
@@ -779,6 +894,7 @@ function renderDashboard(d) {
 
   root.append(el('div', { class: 'dash-cols' }, trendPanel, distPanel));
   root.append(el('div', { class: 'dash-cols' }, panel('高分素材榜', '按评分排序', topBody), panel('团队活跃度', '评论 + 下载 + 评分 + 上传 + 认领', teamBody)));
+  root.append(el('div', { class: 'dash-cols' }, pipelinePanel(), dimsPanel()));
   root.append(el('div', { class: 'dash-cols' }, panel('需求概览', '状态分布', reqBody), panel('最近动态', '实时联动', feedBody)));
   root.append(panel('我的贡献', '登录至今的累计数据', mineBody));
 
@@ -804,6 +920,7 @@ async function loadVideos(append = false) {
   if (S.filter === 'starred') p.set('starred', '1');
   if (S.filter === 'star4') p.set('minRating', '4');
   if (S.filter === 'qcBad') p.set('qc', 'bad');
+  if (S.stage) p.set('stage', S.stage);
 
   try {
     const data = await api('/videos?' + p);
@@ -862,8 +979,12 @@ async function loadMembers() {
 
 async function refreshStats() {
   try {
-    const s = await api('/stats');
+    const [s, pipe] = await Promise.all([
+      api('/stats'),
+      api('/pipeline?space=' + S.space).catch(() => null),
+    ]);
     S.stats = s;
+    if (pipe) S.pipeline = pipe;
     document.querySelector('[data-cnt="daily"]').textContent = s.dailyToday || '';
     document.querySelector('[data-cnt="library"]').textContent = s.library || '';
     document.querySelector('[data-cnt="requests"]').textContent = s.requestsOpen || '';
@@ -1422,11 +1543,11 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar }) {
       el('div', { class: `qc-score ${scoreCls}` }, v.qc_status === 'pending' ? '…' : (v.qc_score == null ? '—' : String(v.qc_score))),
       el('div', { style: { flex: 1, minWidth: 0 } },
         el('div', { class: 'qc-title' },
-          v.qc_status === 'pending' ? '排队体检中'
+          '投放体检 · ' + (v.qc_status === 'pending' ? '排队中'
             : v.qc_status === 'failed' ? '体检失败（文件可能读不了）'
               : v.qc_score >= 80 ? '各项正常，可以投放'
                 : v.qc_score >= 60 ? '有风险项，建议处理后投放'
-                  : '问题较多，不建议直接投放'),
+                  : '问题较多，不建议直接投放')),
         el('div', { class: 'qc-sub' },
           flags.length ? flags.map(f => QC_LABELS[f] || f).join(' · ') : '未发现明显问题'),
       ),
@@ -1456,6 +1577,68 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar }) {
           ),
         )
       : null,
+  );
+
+  // ---- 内容评分（分维度）+ 阶段流转 ----
+  const sc = parseScores(v.scores);
+  const totalScoreEl = el('div', {
+    class: 'qc-score' + (v.score_content == null ? '' : v.score_content >= 80 ? ' good' : v.score_content >= 60 ? ' mid' : ' bad'),
+  }, v.score_content == null ? '—' : String(v.score_content));
+
+  const paintTotal = cs => {
+    v.score_content = cs;
+    totalScoreEl.textContent = cs == null ? '—' : String(cs);
+    totalScoreEl.className = 'qc-score ' + (cs == null ? '' : cs >= 80 ? 'good' : cs >= 60 ? 'mid' : 'bad');
+  };
+
+  const saveScores = async patch => {
+    const merged = { ...sc, ...patch };
+    try {
+      const res = await api('/videos/' + v.id, { method: 'PATCH', body: { scores: merged } });
+      Object.assign(sc, merged);
+      paintTotal(res.video.score_content);
+    } catch (e) { toast(e.message, 'err'); }
+  };
+
+  const scRows = DIMS.map(d => {
+    const val = Number(sc[d.key]) || 0;
+    const out = el('span', { class: 'sc-val' }, val ? String(val) : '—');
+    const range = el('input', {
+      type: 'range', min: '0', max: '10', step: '1', value: String(val), class: 'sc-range', title: d.hint,
+    });
+    range.addEventListener('input', () => { out.textContent = range.value; });
+    range.addEventListener('change', () => saveScores({ [d.key]: Number(range.value) }));
+    return el('div', { class: 'sc-row' },
+      el('span', { class: 'sc-lbl', title: d.hint }, d.label), range, out);
+  });
+
+  const stageRow = el('div', { class: 'stagepick' },
+    ...STAGES.map(s => el('button', {
+      class: 'spick' + (v.stage === s.key ? ' on' : ''),
+      onclick: async ev => {
+        try {
+          await api('/videos/' + v.id, { method: 'PATCH', body: { stage: s.key } });
+          v.stage = s.key;
+          ev.currentTarget.parentElement.querySelectorAll('.spick')
+            .forEach(b => b.classList.toggle('on', b === ev.currentTarget));
+          toast(`已移到「${s.label}」`);
+          reload();
+          refreshStats();
+        } catch (e) { toast(e.message, 'err'); }
+      },
+    }, s.label)));
+
+  const scoreSec = el('div', { class: 'dsec' },
+    el('div', { class: 'qc-head' },
+      totalScoreEl,
+      el('div', { style: { flex: 1, minWidth: 0 } },
+        el('div', { class: 'qc-title' }, '内容评分'),
+        el('div', { class: 'qc-sub' }, '5 个维度各 0-10 分，综合分 = 均分 ×10；比单一星标更容易定位短板'),
+      ),
+    ),
+    el('div', { class: 'sc-list' }, ...scRows),
+    el('div', { class: 'mini-lbl', style: { marginTop: '12px', display: 'block' } }, '流水线阶段'),
+    stageRow,
   );
 
   // ---- 评论 ----
@@ -1499,7 +1682,7 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar }) {
     cmtList,
   );
 
-  scroll.append(player, sec1, actSec, qcSec);
+  scroll.append(player, sec1, actSec, scoreSec, qcSec);
   if (siblings?.length) {
     scroll.append(el('div', { class: 'dsec' },
       el('div', { class: 'mini-lbl', style: { marginBottom: '8px' } }, '同一需求下的其他素材'),
