@@ -151,7 +151,10 @@ environment:
       - /volume1/拍摄投递:/watch:ro
       - ./server:/app/server
       - ./public:/app/public
+      - ./package.json:/app/package.json:ro
 ```
+
+> 最后一行只读挂载 `package.json`，是为了让 `/api/version` 显示的版本号与磁盘文件一致（否则它读的是镜像里的旧版本号，容易误判升级是否成功）。
 
 保存 → 重新部署（只重建容器，十几秒，**不构建镜像**）。之后每次升级只需：
 

@@ -1,13 +1,14 @@
 # 可选覆盖文件：让容器直接读取宿主机上的源码，改代码只需「重启」不用「构建」
 #
 # 用法（群晖 Container Manager）：
-#   项目 → YAML 配置 → 把这 4 行合并进 volumes 里，保存后重新部署
+#   项目 → YAML 配置 → 把这 5 行合并进 volumes 里，保存后重新部署
 #
 #   volumes:
 #     - ./data:/data
 #     - /volume1/拍摄投递:/watch:ro
 #     - ./server:/app/server
 #     - ./public:/app/public
+#     - ./package.json:/app/package.json:ro
 #
 # 或者在命令行：docker compose -f docker-compose.yml -f docker-compose.source.yml up -d
 
@@ -16,3 +17,5 @@ services:
     volumes:
       - ./server:/app/server
       - ./public:/app/public
+      # 只读挂载，保证 /api/version 显示的版本号与磁盘一致
+      - ./package.json:/app/package.json:ro
