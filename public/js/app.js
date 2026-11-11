@@ -1,0 +1,1810 @@
+import { api, getUser, setUser, storedUid, mediaUrl, uploadFiles, setUnauthorizedHandler } from './api.js';
+import {
+  el, $, esc, toast, openModal, closeModal, confirmDialog, fmtDuration, fmtBytes,
+  fmtDate, timeAgo, dayLabel, ymd, avatar, avatarMini, emptyState, skeleton, debounce, initials,
+  roleLabel, animateNumber, delta, shortDate, weekdayOf,
+} from './util.js';
+import { videoCard, videoRow, requestCard, downloadBatch, statCard, icon, starIcon } from './render.js';
+
+/* ========================= 主题 ========================= */
+const THEME_KEY = 'tk.theme';
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function applyTheme(theme, persist = true) {
+  document.documentElement.dataset.theme = theme;
+  if (persist) localStorage.setItem(THEME_KEY, theme);
+  for (const id of ['themeBtn', 'authTheme']) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    btn.innerHTML = '';
+    btn.append(icon(theme === 'light' ? 'sun' : 'moon', 15));
+    btn.title = theme === 'light' ? '切换到深色' : '切换到亮色';
+  }
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', theme === 'light' ? '#F4F6FB' : '#07080D');
+}
+
+function initTheme() {
+  const urlTheme = new URLSearchParams(location.search).get('theme');
+  if (urlTheme === 'light' || urlTheme === 'dark') {
+    applyTheme(urlTheme);
+    return;
+  }
+  const saved = localStorage.getItem(THEME_KEY);
+  const sys = window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  applyTheme(saved || sys, false);
+}
+
+function toggleTheme() {
+  applyTheme(currentTheme() === 'light' ? 'dark' : 'light');
+}
+
+const S = {
+  user: null,
+  view: 'dashboard',
+  space: 'daily',
+  date: '',
+  from: '',
+  to: '',
+  q: '',
+  filter: 'all',        // all | new | notDownloaded | picked | hasComments | starred | star4 | star5
+  tag: '',
+  sort: 'newest',
+  layout: 'grid',
+  selected: new Set(),
+  items: [],
+  dates: [],
+  tags: [],
+  total: 0,
+  offset: 0,
+  loading: false,
+  stats: null,
+  dash: null,
+  requests: [],
+  reqCounts: {},
+  reqFilter: 'active',
+  members: [],
+};
+
+const VIEW_META = {
+  dashboard: { title: '工作仪表盘', sub: '团队今天干了什么，数据说话' },
+  daily: { title: '每日选片', sub: '拍摄投递的素材，挑一条开干' },
+  library: { title: '素材库', sub: '沉淀下来的通用素材，随时取用' },
+  requests: { title: '视频需求', sub: '运营发需求，拍摄认领交付' },
+  records: { title: '下载记录', sub: '谁在什么时候拿走了哪条素材' },
+  members: { title: '成员', sub: '团队账号与分工' },
+};
+
+/* ========================= 启动 ========================= */
+init();
+
+async function init() {
+  initTheme();
+  setUnauthorizedHandler(() => {
+    setUser(null);
+    showAuth();
+  });
+  bindAuth();
+  bindGlobal();
+
+  const params = new URLSearchParams(location.search);
+  const layoutParam = params.get('layout');
+  if (layoutParam === 'list' || layoutParam === 'grid') S.layout = layoutParam;
+
+  const uid = storedUid();
+  if (uid) {
+    try {
+      const r = await api('/me', { headers: { 'x-user-id': uid } });
+      const view = params.get('view');
+      enterApp(r.user, VIEW_META[view] ? view : 'dashboard');
+      const openId = params.get('open');
+      if (openId) setTimeout(() => openVideo(openId), 400);
+      if (params.get('panel') === 'upload') setTimeout(() => openUploader(), 500);
+      return;
+    } catch { /* 登录态失效，走登录页 */ }
+  }
+  showAuth();
+}
+
+function bindAuth() {
+  const tabs = document.getElementById('authTabs');
+  const ind = tabs.querySelector('.tab-ind');
+  const loginForm = document.getElementById('loginForm');
+  const registerForm = document.getElementById('registerForm');
+
+  // 给所有密码框加「显示 / 隐藏」按钮
+  document.querySelectorAll('.auth-form input[type="password"]').forEach(inp => {
+    if (inp.parentElement.classList.contains('pw-wrap')) return;
+    const btn = el('button', { type: 'button', class: 'pw-eye' }, '显示');
+    btn.addEventListener('click', () => {
+      const show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      btn.textContent = show ? '隐藏' : '显示';
+    });
+    const wrap = el('div', { class: 'pw-wrap' });
+    inp.replaceWith(wrap);
+    wrap.append(inp, btn);
+  });
+
+  tabs.addEventListener('click', e => {
+    const btn = e.target.closest('.tab');
+    if (!btn) return;
+    const isReg = btn.dataset.tab === 'register';
+    tabs.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t === btn));
+    ind.classList.toggle('right', isReg);
+    loginForm.hidden = isReg;
+    registerForm.hidden = !isReg;
+    setTimeout(() => (isReg ? document.getElementById('regName') : document.getElementById('loginName'))?.focus(), 60);
+  });
+
+  document.getElementById('rolePick').addEventListener('click', e => {
+    const btn = e.target.closest('.role');
+    if (!btn) return;
+    document.querySelectorAll('#rolePick .role').forEach(b => b.classList.toggle('on', b === btn));
+  });
+
+  loginForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    const err = document.getElementById('loginErr');
+    const btn = document.getElementById('loginBtn');
+    const name = document.getElementById('loginName').value.trim();
+    const password = document.getElementById('loginPass').value;
+    err.hidden = true;
+    btn.disabled = true;
+    btn.textContent = '登录中…';
+    try {
+      const r = await api('/login', { method: 'POST', body: { name, password } });
+      enterApp(r.user, 'dashboard');
+      toast(`欢迎回来，${r.user.name}`);
+    } catch (ex) {
+      err.textContent = ex.message;
+      err.hidden = false;
+      btn.disabled = false;
+      btn.textContent = '进入工作台';
+    }
+  });
+
+  registerForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    const err = document.getElementById('regErr');
+    const btn = document.getElementById('regBtn');
+    const name = document.getElementById('regName').value.trim();
+    const password = document.getElementById('regPass').value;
+    const password2 = document.getElementById('regPass2').value;
+    const role = document.querySelector('#rolePick .role.on')?.dataset.role || 'ops';
+    err.hidden = true;
+    if (password !== password2) {
+      err.textContent = '两次输入的密码不一致';
+      err.hidden = false;
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = '创建中…';
+    try {
+      const r = await api('/users', { method: 'POST', body: { name, role, password } });
+      enterApp(r.user, 'dashboard');
+      toast('账号已创建，欢迎加入');
+    } catch (ex) {
+      err.textContent = ex.message;
+      err.hidden = false;
+      btn.disabled = false;
+      btn.textContent = '创建账号并进入';
+    }
+  });
+
+  document.getElementById('authTheme').addEventListener('click', toggleTheme);
+}
+
+function bindGlobal() {
+  document.getElementById('themeBtn').addEventListener('click', toggleTheme);
+  document.getElementById('uploadBtn').addEventListener('click', openUploader);
+  document.getElementById('meBtn').addEventListener('click', openMeMenu);
+  document.getElementById('scanBtn').addEventListener('click', runScan);
+
+  const onNav = e => {
+    const btn = e.target.closest('button[data-view]');
+    if (btn) switchView(btn.dataset.view);
+  };
+  document.getElementById('nav').addEventListener('click', onNav);
+  document.getElementById('navMain').addEventListener('click', onNav);
+  document.getElementById('mobileNav').addEventListener('click', onNav);
+
+  document.getElementById('searchInput').addEventListener('input', debounce(e => {
+    S.q = e.target.value.trim();
+    reload();
+  }, 300));
+  document.getElementById('bulkbar').addEventListener('click', onBulkAction);
+}
+
+/* ========================= 身份 ========================= */
+function showAuth() {
+  document.getElementById('app').hidden = true;
+  document.getElementById('auth').hidden = false;
+  document.getElementById('drawer').hidden = true;
+  document.getElementById('bulkbar').hidden = true;
+  setTimeout(() => document.getElementById('loginName')?.focus(), 120);
+}
+
+function enterApp(user, view = 'dashboard') {
+  setUser(user);
+  S.user = user;
+  if (!S.date) S.date = ymd();
+  document.getElementById('auth').hidden = true;
+  document.getElementById('app').hidden = false;
+  const av = $('#meAvatar');
+  av.textContent = initials(user.name);
+  av.style.background = user.color;
+  $('#meName').textContent = user.name;
+  S.view = '';
+  switchView(view, true);
+}
+
+function openMeMenu() {
+  const foot = [
+    el('button', { class: 'btn btn-ghost', onclick: () => { closeModal(); openPasswordModal(); } }, '修改密码'),
+    el('button', { class: 'btn btn-danger', onclick: () => { closeModal(); logout(); } }, '退出登录'),
+  ];
+
+  openModal({
+    title: '我的账号',
+    body: el('div', { class: 'modal-body' },
+      el('div', { style: { display: 'flex', alignItems: 'center', gap: '14px' } },
+        avatar(S.user.name, S.user.color, 48),
+        el('div', {},
+          el('div', { style: { fontSize: '15px', fontWeight: 700 } }, S.user.name),
+          el('div', { style: { fontSize: '11.5px', color: 'var(--tx3)', marginTop: '2px' } },
+            `${roleLabel(S.user.role)} · 加入于 ${new Date(S.user.created_at).toLocaleDateString('zh-CN')}`),
+        ),
+      ),
+      el('div', { class: 'mine-grid', style: { marginTop: '6px' } },
+        ...Object.entries({
+          评论: S.dash?.mine?.comments ?? 0,
+          下载: S.dash?.mine?.downloads ?? 0,
+          评分: S.dash?.mine?.ratings ?? 0,
+          上传: S.dash?.mine?.uploads ?? 0,
+        }).map(([k, v]) => el('div', { class: 'mine-item' }, el('b', {}, String(v)), el('span', {}, k))),
+      ),
+      el('p', { style: { fontSize: '11px', color: 'var(--tx3)', lineHeight: 1.7 } },
+        '身份用于标记谁上传、谁下载、谁评论。退出后需要重新输入密码。'),
+    ),
+    footer: foot,
+  });
+}
+
+function openPasswordModal() {
+  const oldPass = el('input', { type: 'password', placeholder: '当前密码', autocomplete: 'current-password' });
+  const newPass = el('input', { type: 'password', placeholder: '至少 6 位', autocomplete: 'new-password' });
+  const newPass2 = el('input', { type: 'password', placeholder: '再输入一次', autocomplete: 'new-password' });
+
+  openModal({
+    title: '修改密码',
+    body: el('div', { class: 'modal-body' },
+      el('div', { class: 'field' }, el('label', {}, '当前密码'), oldPass),
+      el('div', { class: 'field' }, el('label', {}, '新密码'), newPass),
+      el('div', { class: 'field' }, el('label', {}, '确认新密码'), newPass2),
+    ),
+    footer: [
+      el('button', { class: 'btn btn-ghost', onclick: () => closeModal() }, '取消'),
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: async () => {
+          if (newPass.value !== newPass2.value) return toast('两次输入的新密码不一致', 'err');
+          try {
+            await api(`/users/${S.user.id}/password`, {
+              method: 'POST',
+              body: { oldPassword: oldPass.value, newPassword: newPass.value },
+            });
+            closeModal();
+            toast('密码已更新');
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, '保存'),
+    ],
+  });
+  setTimeout(() => oldPass.focus(), 60);
+}
+
+function logout() {
+  setUser(null);
+  S.user = null;
+  S.dash = null;
+  showAuth();
+}
+
+/* ========================= 视图切换 ========================= */
+function switchView(view, force = false) {
+  if (S.view === view && !force) return;
+  S.view = view;
+  S.selected.clear();
+  if (view === 'library') S.space = 'library';
+  else if (view === 'daily') S.space = 'daily';
+  updateBulkBar();
+  const meta = VIEW_META[view] || VIEW_META.dashboard;
+  $('#viewTitle').textContent = meta.title;
+  $('#viewSub').textContent = meta.sub;
+  document.querySelectorAll('#nav button, #navMain button, #mobileNav button')
+    .forEach(b => b.classList.toggle('on', b.dataset.view === view));
+  const showSearch = ['daily', 'library', 'requests'].includes(view);
+  const searchBox = document.querySelector('.search');
+  if (searchBox) searchBox.style.display = showSearch ? '' : 'none';
+  $('#uploadBtn').style.display = ['dashboard', 'records', 'members'].includes(view) ? 'none' : '';
+  S.offset = 0;
+  renderToolbar();
+  reload();
+  refreshStats();
+}
+
+/* ========================= 工具栏 ========================= */
+function renderToolbar() {
+  const bar = $('#toolbar');
+  bar.innerHTML = '';
+  if (S.view === 'daily' || S.view === 'library') {
+    if (S.view === 'daily') bar.append(renderDateBar());
+    bar.append(renderFilterBar());
+  }
+  if (S.view === 'requests') bar.append(renderReqFilter());
+}
+
+function renderDateBar() {
+  const wrap = el('div', { class: 'datebar' });
+  const allCount = S.dates.reduce((a, d) => a + d.count, 0);
+  const ranged = !!(S.from || S.to);
+
+  wrap.append(el('button', {
+    class: 'datechip' + (S.date === '' && !ranged ? ' on' : ''),
+    onclick: () => { S.date = ''; S.from = ''; S.to = ''; renderToolbar(); reload(); },
+  },
+    el('b', {}, '全部'),
+    el('span', {}, `${allCount} 条`),
+  ));
+
+  wrap.append(el('button', {
+    class: 'datechip' + (ranged ? ' range' : ''),
+    onclick: openRangePicker,
+  },
+    el('b', {}, ranged ? '日期范围' : '选范围'),
+    el('span', {}, ranged
+      ? `${(S.from || '…').slice(5)} ~ ${(S.to || '…').slice(5)}`
+      : '按区间筛选'),
+  ));
+
+  for (const d of S.dates) {
+    const chip = el('button', {
+      class: 'datechip' + (S.date === d.date && !ranged ? ' on' : ''),
+      onclick: () => { S.date = d.date; S.from = ''; S.to = ''; renderToolbar(); reload(); },
+    },
+      el('b', {}, dayLabel(d.date)),
+      el('span', {}, `${d.date.slice(5)} · ${d.count} 条`),
+    );
+    if (d.fresh > 0) {
+      chip.style.position = 'relative';
+      chip.append(el('i', { class: 'badge-new' }));
+    }
+    wrap.append(chip);
+  }
+  if (!S.dates.length) {
+    wrap.append(el('span', { style: { fontSize: '11px', color: 'var(--tx3)', padding: '8px 4px' } }, '暂无收录日期'));
+  }
+  return wrap;
+}
+
+function openRangePicker() {
+  const from = el('input', { type: 'date', value: S.from || '' });
+  const to = el('input', { type: 'date', value: S.to || '' });
+  const today = new Date();
+  const quick = el('div', { class: 'range-quick' });
+  const addQuick = (label, f, t) => quick.append(el('button', {
+    class: (S.from === f && S.to === t) ? 'on' : '',
+    onclick: () => { from.value = f; to.value = t; },
+  }, label));
+
+  addQuick('今天', ymd(today), ymd(today));
+  addQuick('近 7 天', ymd(new Date(Date.now() - 6 * 864e5)), ymd(today));
+  addQuick('近 30 天', ymd(new Date(Date.now() - 29 * 864e5)), ymd(today));
+  addQuick('本月', ymd(new Date(today.getFullYear(), today.getMonth(), 1)), ymd(today));
+
+  const apply = (f, t) => {
+    if (f && t && f > t) { toast('开始日期不能晚于结束日期', 'err'); return; }
+    S.from = f; S.to = t;
+    if (f || t) S.date = '';
+    closeModal();
+    renderToolbar();
+    reload();
+  };
+
+  openModal({
+    title: '按日期范围筛选',
+    body: el('div', { class: 'modal-body' },
+      quick,
+      el('div', { class: 'field-row' },
+        el('div', { class: 'field' }, el('label', {}, '开始日期'), from),
+        el('div', { class: 'field' }, el('label', {}, '结束日期'), to),
+      ),
+      el('p', { style: { fontSize: '11px', color: 'var(--tx3)', lineHeight: 1.7 } },
+        '按素材的拍摄日期筛选，只看一端也可以（留空表示不限）。'),
+    ),
+    footer: [
+      el('button', { class: 'btn btn-ghost', onclick: () => apply('', '') }, '清除范围'),
+      el('button', { class: 'btn btn-primary', onclick: () => apply(from.value, to.value) }, '应用'),
+    ],
+  });
+}
+
+const FILTERS = [
+  ['all', '全部'],
+  ['new', '未处理'],
+  ['notDownloaded', '未下载'],
+  ['picked', '已选'],
+  ['starred', '已标星'],
+  ['star4', '4星+'],
+  ['hasComments', '有评论'],
+];
+
+function renderFilterBar() {
+  const bar = el('div', { class: 'filterbar' });
+
+  const seg = el('div', { class: 'seg' });
+  for (const [k, label] of FILTERS) {
+    seg.append(el('button', {
+      class: S.filter === k ? 'on' : '',
+      onclick: () => { S.filter = k; renderToolbar(); reload(); },
+    }, label));
+  }
+  bar.append(seg);
+
+  const tags = el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } });
+  if (S.tag) {
+    tags.append(el('button', { class: 'tchip on', onclick: () => { S.tag = ''; renderToolbar(); reload(); } }, `${S.tag} ✕`));
+  }
+  for (const t of S.tags.filter(t => t.name !== S.tag).slice(0, 6)) {
+    tags.append(el('button', { class: 'tchip', onclick: () => { S.tag = t.name; renderToolbar(); reload(); } },
+      `${t.name}`, el('span', { style: { opacity: .5, marginLeft: '4px' } }, t.count)));
+  }
+  bar.append(tags);
+
+  bar.append(el('div', { class: 'spacer' }));
+
+  const sortSel = el('select', {
+    class: 'sortsel',
+    onchange: e => { S.sort = e.target.value; reload(); },
+  },
+    el('option', { value: 'newest' }, '最新入库'),
+    el('option', { value: 'shoot' }, '拍摄日期'),
+    el('option', { value: 'rating' }, '评分最高'),
+    el('option', { value: 'duration' }, '时长最长'),
+  );
+  sortSel.value = S.sort;
+  bar.append(sortSel);
+
+  const layoutBtn = el('button', {
+    class: 'btn btn-ghost sm',
+    title: '切换视图',
+    onclick: () => { S.layout = S.layout === 'grid' ? 'list' : 'grid'; renderToolbar(); renderList(); },
+  }, S.layout === 'grid' ? '▤ 列表' : '▦ 卡片');
+  bar.append(layoutBtn);
+
+  return bar;
+}
+
+const REQ_FILTERS = [['active', '进行中'], ['open', '待认领'], ['done', '已完成'], ['all', '全部']];
+
+function renderReqFilter() {
+  const bar = el('div', { class: 'filterbar' });
+  const seg = el('div', { class: 'seg' });
+  for (const [k, label] of REQ_FILTERS) {
+    seg.append(el('button', {
+      class: S.reqFilter === k ? 'on' : '',
+      onclick: () => { S.reqFilter = k; renderToolbar(); loadRequests(); },
+    }, label));
+  }
+  bar.append(seg);
+  bar.append(el('div', { class: 'spacer' }));
+  bar.append(el('button', { class: 'btn btn-primary', onclick: openRequestModal }, '＋ 发布视频需求'));
+  return bar;
+}
+
+/* ========================= 数据加载 ========================= */
+async function reload() {
+  if (S.view === 'dashboard') await loadDashboard();
+  else if (S.view === 'daily' || S.view === 'library') await loadVideos();
+  else if (S.view === 'requests') await loadRequests();
+  else if (S.view === 'records') await loadRecords();
+  else if (S.view === 'members') await loadMembers();
+}
+
+/* ========================= 仪表盘 ========================= */
+async function loadDashboard() {
+  $('#view').replaceChildren(skeleton(6));
+  try {
+    const d = await api('/dashboard?days=14');
+    S.dash = d;
+    if (S.view === 'dashboard') renderDashboard(d);
+  } catch (e) {
+    $('#view').replaceChildren(emptyState({ icon: '!', title: '仪表盘加载失败', message: e.message }));
+  }
+}
+
+function kpiCard({ cls = '', ico, label, value, decimals = 0, unit = '', deltaInfo = null, foot = '' }) {
+  const num = el('span', {}, '0');
+  const card = el('article', { class: `kpi ${cls}` },
+    el('div', { class: 'kpi-top' },
+      el('span', { class: 'kpi-ico' }, icon(ico, 14)),
+      el('span', { class: 'kpi-lbl' }, label),
+    ),
+    el('div', { class: 'kpi-val' }, num, unit ? el('span', { class: 'kpi-unit' }, unit) : null),
+    (deltaInfo || foot)
+      ? el('div', { class: 'kpi-foot' },
+          deltaInfo ? el('span', { class: `kpi-delta ${deltaInfo.dir}` }, deltaInfo.text) : null,
+          foot ? el('span', {}, foot) : null)
+      : null,
+  );
+  animateNumber(num, value, { decimals });
+  return card;
+}
+
+function panel(title, sub, body, extra = null) {
+  return el('section', { class: 'panel-card' },
+    el('div', { class: 'panel-head' },
+      el('h3', {}, title),
+      sub ? el('span', { class: 'sub' }, sub) : null,
+      extra,
+    ),
+    body,
+  );
+}
+
+function renderDashboard(d) {
+  const k = d.kpi;
+  const view = $('#view');
+  view.innerHTML = '';
+  const root = el('div', { class: 'dash' });
+
+  // ---- 问候 ----
+  const hour = new Date().getHours();
+  const greet = hour < 6 ? '凌晨好' : hour < 11 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
+  root.append(el('section', { class: 'greeting' },
+    el('div', {
+      class: 'avatar-lg',
+      style: { background: `linear-gradient(140deg, ${S.user.color}, var(--brand-2))` },
+    }, initials(S.user.name)),
+    el('div', { class: 'greeting-txt' },
+      el('h2', {}, `${greet}，${S.user.name}`),
+      el('p', {}, `${d.today} ${weekdayOf(d.today)} · 今日新增素材 ${k.videosToday} 条、评论 ${k.comments.today} 条、下载 ${k.downloads.today} 次`),
+    ),
+    el('div', { class: 'greeting-side' },
+      el('div', {}, el('b', {}, String(k.requests.open + k.requests.claimed)), el('span', {}, '待处理需求')),
+      el('div', {}, el('b', {}, String(k.activeMembers)), el('span', {}, '近 7 天活跃')),
+    ),
+  ));
+
+  // ---- KPI ----
+  root.append(el('div', { class: 'kpi-grid' },
+    kpiCard({ ico: 'video', label: '今日新增素材', value: k.videosToday, unit: '条', foot: `总计 ${k.videosTotal} 条` }),
+    kpiCard({ cls: 'gd', ico: 'star', label: '平均评分', value: k.ratings.avg, decimals: 1, unit: '/ 5', foot: `${k.ratings.rated} 条已评 · 覆盖 ${k.ratings.coverage}%` }),
+    kpiCard({ cls: 'pk', ico: 'comment', label: '评论总数', value: k.comments.total, unit: '条', deltaInfo: delta(k.comments.week, k.comments.prevWeek), foot: '较上周' }),
+    kpiCard({ cls: 'cy', ico: 'download', label: '下载次数', value: k.downloads.total, unit: '次', deltaInfo: delta(k.downloads.week, k.downloads.prevWeek), foot: '较上周' }),
+    kpiCard({ cls: 'gn', ico: 'check', label: '已完成需求', value: k.requests.done, unit: '个', deltaInfo: delta(k.requests.doneWeek, k.requests.donePrevWeek), foot: `共 ${k.requests.total} 个` }),
+    kpiCard({ ico: 'users', label: '团队成员', value: k.members, unit: '人', foot: `${k.activeMembers} 人近 7 天有动作` }),
+  ));
+
+  // ---- 趋势 ----
+  const maxV = Math.max(1, ...d.trend.flatMap(t => [t.uploads, t.comments, t.downloads]));
+  const H = 132;
+  const seg = (cls, v) => el('i', {
+    class: `bar-seg ${cls}`,
+    style: {
+      height: (v > 0 ? Math.max(3, Math.round(v / maxV * H)) : 2) + 'px',
+      ...(v > 0 ? {} : { background: 'var(--line)' }),
+    },
+  });
+  const chart = el('div', { class: 'chart' },
+    ...d.trend.map(t => el('div', { class: 'bar-col', title: `${t.date} · 素材 ${t.uploads} / 评论 ${t.comments} / 下载 ${t.downloads}` },
+      el('div', { class: 'bar-stack' },
+        seg('up', t.uploads),
+        seg('cm', t.comments),
+        seg('dl', t.downloads),
+      ),
+      el('span', { class: 'bar-x' }, shortDate(t.date)),
+    )),
+  );
+
+  const trendPanel = panel('近 14 天动态', '素材入库 / 评论 / 下载', chart,
+    el('div', { class: 'legend' },
+      el('span', {}, el('i', { class: 'l-up' }), '素材'),
+      el('span', {}, el('i', { class: 'l-cm' }), '评论'),
+      el('span', {}, el('i', { class: 'l-dl' }), '下载'),
+    ));
+
+  // ---- 评分分布 ----
+  const distBody = el('div', { class: 'dist' },
+    ...d.ratingDist.map(r => el('div', { class: 'dist-row' },
+      el('span', { class: 'dist-star' }, starIcon(11, true), String(r.star)),
+      el('div', { class: 'dist-bar' }, el('i', { style: { width: Math.max(1, r.pct) + '%' } })),
+      el('span', { class: 'dist-num' }, `${r.count} · ${r.pct}%`),
+    )),
+  );
+  const distPanel = panel('评分分布', `${k.ratings.rated} 条已评 · 平均 ${k.ratings.avg} 星`,
+    el('div', {},
+      distBody,
+      el('div', { style: { display: 'flex', gap: '8px', marginTop: '14px', flexWrap: 'wrap' } },
+        el('span', { class: 'pill done' }, `5 星 ${k.ratings.five}`),
+        el('span', { class: 'pill claimed' }, `4 星+ ${k.ratings.fourPlus}`),
+        el('span', { class: 'pill' }, `未评 ${k.videosTotal - k.ratings.rated}`),
+      ),
+    ));
+
+  // ---- 高分素材 ----
+  const topBody = d.topVideos.length
+    ? el('div', { class: 'rank-list' },
+        ...d.topVideos.map((v, i) => el('div', {
+          class: 'rank-item',
+          onclick: () => openVideo(v.id),
+        },
+          el('span', { class: 'rank-no' }, String(i + 1)),
+          el('div', { class: 'rank-thumb' },
+            v.thumb_path ? el('img', { src: mediaUrl(`/api/videos/${v.id}/thumb`), loading: 'lazy', alt: '' }) : null),
+          el('div', { class: 'rank-info' },
+            el('div', { class: 'rank-title' }, v.title || v.orig_name || '未命名素材'),
+            el('div', { class: 'rank-meta' },
+              el('span', {}, v.uploader_name || '目录投递'),
+              el('span', {}, `· ${v.comments} 评论 · ${v.downloads} 下载`),
+            ),
+          ),
+          el('span', { class: 'rank-stars' }, starIcon(10, true), String(v.rating)),
+        )),
+      )
+    : emptyState({ icon: '★', title: '还没有评分', message: '在选片时点星星打分，高分素材会出现在这里' });
+
+  // ---- 团队 ----
+  const maxAct = Math.max(1, ...d.team.map(t => t.comments + t.downloads + t.ratings + t.uploads + t.claims));
+  const teamBody = el('div', { class: 'team-list' },
+    ...d.team.slice(0, 8).map(t => {
+      const act = t.comments + t.downloads + t.ratings + t.uploads + t.claims;
+      return el('div', { class: 'team-row' },
+        el('div', { class: 'team-name' },
+          avatarMini(t.name, t.color),
+          el('b', {}, t.name),
+          el('em', {}, roleLabel(t.role)),
+          el('span', { class: 'team-act' }, `${act} 次动作${t.done ? ` · 完成 ${t.done}` : ''}`),
+        ),
+        el('div', { class: 'team-bar' }, el('i', { style: { width: Math.max(3, Math.round(act / maxAct * 100)) + '%' } })),
+      );
+    }),
+  );
+
+  // ---- 需求概览 ----
+  const reqTotalSafe = Math.max(1, k.requests.total);
+  const segBar = el('div', { style: { display: 'flex', height: '10px', borderRadius: '99px', overflow: 'hidden', background: 'var(--panel-3)', margin: '4px 0 14px' } },
+    el('i', { style: { width: (k.requests.open / reqTotalSafe * 100) + '%', background: 'var(--gold)' } }),
+    el('i', { style: { width: (k.requests.claimed / reqTotalSafe * 100) + '%', background: 'var(--cy)' } }),
+    el('i', { style: { width: (k.requests.done / reqTotalSafe * 100) + '%', background: 'var(--ok)' } }),
+  );
+  const reqBody = el('div', {},
+    segBar,
+    el('div', { class: 'dist' },
+      ...[
+        ['待认领', k.requests.open, 'var(--gold)'],
+        ['进行中', k.requests.claimed, 'var(--cy)'],
+        ['已完成', k.requests.done, 'var(--ok)'],
+      ].map(([label, val, color]) => el('div', { class: 'dist-row' },
+        el('span', { style: { fontSize: '11px', color: 'var(--tx2)' } }, label),
+        el('div', { class: 'dist-bar' },
+          el('i', { style: { width: Math.max(1, Math.round(val / reqTotalSafe * 100)) + '%', background: color } })),
+        el('span', { class: 'dist-num' }, String(val)),
+      )),
+    ),
+    k.requests.overdue > 0
+      ? el('div', { style: { marginTop: '12px' } },
+          el('span', { class: 'pill high' }, `⚠ ${k.requests.overdue} 个需求已逾期`))
+      : el('div', { style: { marginTop: '12px', fontSize: '11px', color: 'var(--tx3)' } }, '没有逾期需求，节奏不错'),
+    el('div', { style: { marginTop: '12px' } },
+      el('button', { class: 'btn btn-ghost sm', onclick: () => switchView('requests') }, '查看全部需求 →')),
+  );
+
+  // ---- 动态流 ----
+  const FEED_META = {
+    comment: { cls: 'comment', ico: 'comment', verb: '评论了' },
+    download: { cls: 'download', ico: 'download', verb: '下载了' },
+    rating: { cls: 'rating', ico: 'star', verb: '给' },
+    request: { cls: 'request', ico: 'check', verb: '完成了需求' },
+  };
+  const feedBody = d.activity.length
+    ? el('div', { class: 'feed' },
+        ...d.activity.map(a => {
+          const meta = FEED_META[a.type] || FEED_META.comment;
+          return el('div', { class: 'feed-item' },
+            el('span', { class: `feed-ico ${meta.cls}` }, icon(meta.ico, 11)),
+            el('div', { class: 'feed-body' },
+              el('div', { class: 'feed-text' },
+                el('b', {}, a.user_name || '有人'), ' ',
+                a.type === 'rating'
+                  ? ['给了 ', el('span', { class: 'vt' }, a.video_title || '素材'), ` ${a.text} 星`]
+                  : a.type === 'request'
+                    ? ['完成了需求 ', el('span', { class: 'vt' }, a.text)]
+                    : [meta.verb + ' ', el('span', { class: 'vt' }, a.video_title || '素材')],
+              ),
+              a.type === 'comment' && a.text
+                ? el('div', { style: { fontSize: '10.5px', color: 'var(--tx3)', marginTop: '2px' } }, String(a.text).slice(0, 60) + (String(a.text).length > 60 ? '…' : ''))
+                : null,
+              el('div', { class: 'feed-time' }, timeAgo(a.at)),
+            ),
+          );
+        }),
+      )
+    : emptyState({ icon: '◔', title: '还没有动态', message: '上传素材、发评论、打分之后，这里会实时出现' });
+
+  // ---- 我的贡献 ----
+  const mineBody = el('div', { class: 'mine-grid' },
+    ...[
+      ['上传素材', d.mine.uploads],
+      ['发表评论', d.mine.comments],
+      ['素材评分', d.mine.ratings],
+      ['下载次数', d.mine.downloads],
+      ['认领需求', d.mine.claims],
+      ['完成任务', d.mine.done],
+    ].map(([label, val]) => el('div', { class: 'mine-item' },
+      el('b', {}, String(val)), el('span', {}, label))),
+  );
+
+  root.append(el('div', { class: 'dash-cols' }, trendPanel, distPanel));
+  root.append(el('div', { class: 'dash-cols' }, panel('高分素材榜', '按评分排序', topBody), panel('团队活跃度', '评论 + 下载 + 评分 + 上传 + 认领', teamBody)));
+  root.append(el('div', { class: 'dash-cols' }, panel('需求概览', '状态分布', reqBody), panel('最近动态', '实时联动', feedBody)));
+  root.append(panel('我的贡献', '登录至今的累计数据', mineBody));
+
+  view.append(root);
+}
+
+async function loadVideos(append = false) {
+  S.loading = true;
+  if (!append) $('#view').replaceChildren(skeleton(8));
+
+  const p = new URLSearchParams({ space: S.space, limit: '60', offset: String(S.offset), sort: S.sort });
+  if (S.from || S.to) {
+    if (S.from) p.set('from', S.from);
+    if (S.to) p.set('to', S.to);
+  } else if (S.view === 'daily' && S.date) {
+    p.set('date', S.date);
+  }
+  if (S.q) p.set('q', S.q);
+  if (S.tag) p.set('tag', S.tag);
+  if (S.filter === 'new' || S.filter === 'picked') p.set('status', S.filter);
+  if (S.filter === 'notDownloaded') p.set('notDownloaded', '1');
+  if (S.filter === 'hasComments') p.set('hasComments', '1');
+  if (S.filter === 'starred') p.set('starred', '1');
+  if (S.filter === 'star4') p.set('minRating', '4');
+
+  try {
+    const data = await api('/videos?' + p);
+    S.items = append ? [...S.items, ...data.items] : data.items;
+    S.dates = data.dates;
+    S.tags = data.tags;
+    S.total = data.total;
+    renderToolbar();
+    renderList();
+  } catch (e) {
+    $('#view').replaceChildren(emptyState({ icon: '!', title: '加载失败', message: e.message }));
+  } finally {
+    S.loading = false;
+  }
+}
+
+async function loadRequests() {
+  $('#view').replaceChildren(skeleton(4));
+  try {
+    const p = new URLSearchParams();
+    if (S.reqFilter !== 'all') p.set('status', S.reqFilter);
+    if (S.q) p.set('q', S.q);
+    const data = await api('/requests?' + p);
+    S.requests = data.items;
+    S.reqCounts = data.counts;
+    renderRequests();
+  } catch (e) {
+    $('#view').replaceChildren(emptyState({ icon: '!', title: '加载失败', message: e.message }));
+  }
+}
+
+async function loadRecords() {
+  $('#view').replaceChildren(skeleton(3));
+  try {
+    const data = await api('/downloads?limit=200');
+    renderRecords(data.items);
+  } catch (e) {
+    $('#view').replaceChildren(emptyState({ icon: '!', title: '加载失败', message: e.message }));
+  }
+}
+
+async function loadMembers() {
+  $('#view').replaceChildren(skeleton(2));
+  try {
+    const [data, st] = await Promise.all([
+      api('/users'),
+      api('/stats').catch(() => null),
+    ]);
+    S.members = data.items;
+    if (st) S.stats = st;
+    renderMembers();
+  } catch (e) {
+    $('#view').replaceChildren(emptyState({ icon: '!', title: '加载失败', message: e.message }));
+  }
+}
+
+async function refreshStats() {
+  try {
+    const s = await api('/stats');
+    S.stats = s;
+    document.querySelector('[data-cnt="daily"]').textContent = s.dailyToday || '';
+    document.querySelector('[data-cnt="library"]').textContent = s.library || '';
+    document.querySelector('[data-cnt="requests"]').textContent = s.requestsOpen || '';
+    document.querySelector('[data-cnt="members"]').textContent = s.members || '';
+    document.getElementById('todayDl').textContent = s.downloadsToday ?? 0;
+    if (s.scanDir) {
+      const dirEl = document.getElementById('scanDir');
+      dirEl.textContent = s.scanDir;
+      dirEl.title = s.scanDir;
+    }
+    const scan = s.scan || {};
+    const box = document.getElementById('scanBox');
+    const txt = document.getElementById('scanText');
+    if (scan.running) {
+      box.classList.add('busy');
+      txt.textContent = '扫描中…';
+    } else {
+      box.classList.remove('busy');
+      txt.textContent = scan.lastError
+        ? '目录不可读'
+        : scan.lastRunAt
+          ? `上次 ${timeAgo(scan.lastRunAt)}${scan.lastResult?.added ? ` · 新增 ${scan.lastResult.added}` : ''}`
+          : '等待首次扫描';
+    }
+  } catch { /* 静默 */ }
+}
+
+/* ========================= 渲染：视频 ========================= */
+function renderList() {
+  const view = $('#view');
+  view.innerHTML = '';
+
+  if (!S.items.length) {
+    view.append(emptyState({
+      icon: S.view === 'library' ? '◇' : '▦',
+      title: S.q ? '没有匹配的素材' : (S.view === 'library' ? '素材库还是空的' : '这一天还没有素材'),
+      message: S.q
+        ? '换个关键词，或清空搜索条件试试'
+        : (S.view === 'library' ? '把好用的通用素材传进素材库，团队随时取用' : '拍摄投递到 NAS 目录后会自动出现，也可以直接上传'),
+      action: el('button', { class: 'btn btn-primary', onclick: openUploader }, '↑ 上传视频'),
+    }));
+    return;
+  }
+
+  const wrap = S.layout === 'grid' ? el('div', { class: 'grid' }) : el('div', { class: 'list' });
+
+  for (const v of S.items) {
+    const props = {
+      selected: S.selected.has(v.id),
+      onToggle: () => toggleSelect(v.id),
+      onOpen: () => openVideo(v.id),
+      onRate: (video, rating) => rateVideo(video, rating),
+    };
+    wrap.append(S.layout === 'grid' ? videoCard(v, props) : videoRow(v, props));
+  }
+  view.append(wrap);
+
+  if (S.items.length < S.total) {
+    view.append(el('div', { style: { display: 'flex', justifyContent: 'center', marginTop: '20px' } },
+      el('button', {
+        class: 'btn btn-ghost',
+        onclick: async () => {
+          S.offset = S.items.length;
+          await loadVideos(true);
+        },
+      }, `加载更多（还有 ${S.total - S.items.length} 条）`),
+    ));
+  }
+}
+
+/* ========================= 评分 ========================= */
+async function rateVideo(v, rating) {
+  const prev = v.rating;
+  v.rating = rating;
+
+  const node = document.querySelector(`[data-id="${v.id}"]`);
+  const box = node?.querySelector('.card-rating');
+  if (box) {
+    box.classList.toggle('has', rating > 0);
+    [...box.children].forEach((star, idx) => {
+      star.classList.toggle('on', rating > idx);
+      star.replaceChildren(starIcon(11, rating > idx));
+    });
+  }
+
+  try {
+    await api('/videos/' + v.id, { method: 'PATCH', body: { rating } });
+    if (S.filter === 'starred' || S.filter === 'star4') reload();
+  } catch (e) {
+    v.rating = prev;
+    toast(e.message, 'err');
+    renderList();
+  }
+}
+
+function openBulkRate() {
+  const ids = [...S.selected];
+  if (!ids.length) return;
+  let picked = 0;
+  const row = el('div', { class: 'stars-lg', style: { justifyContent: 'center', margin: '6px 0 4px' } });
+  const label = el('div', { class: 'rate-label', style: { textAlign: 'center', marginTop: '10px' } }, '点星星选择评分');
+
+  const paint = () => {
+    row.replaceChildren(...Array.from({ length: 5 }, (_, i) =>
+      el('button', {
+        class: picked > i ? 'on' : '',
+        onclick: () => {
+          picked = picked === i + 1 ? 0 : i + 1;
+          label.textContent = picked ? `将标记为 ${picked} 星` : '点星星选择评分';
+          paint();
+        },
+      }, starIcon(24, picked > i))));
+  };
+  paint();
+
+  openModal({
+    title: `给 ${ids.length} 条素材评分`,
+    body: el('div', { class: 'modal-body', style: { paddingTop: '4px', paddingBottom: '8px' } },
+      row,
+      label,
+      el('p', { style: { fontSize: '11px', color: 'var(--tx3)', textAlign: 'center', marginTop: '14px' } },
+        '再点同一颗星可清除评分'),
+    ),
+    footer: [
+      el('button', { class: 'btn btn-ghost', onclick: () => closeModal() }, '取消'),
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: async () => {
+          try {
+            await api('/videos/bulk-rate', { method: 'POST', body: { ids, rating: picked } });
+            closeModal();
+            S.selected.clear();
+            updateBulkBar();
+            toast(picked ? `已标记 ${ids.length} 条为 ${picked} 星` : '已清除评分');
+            reload();
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, '确定'),
+    ],
+  });
+}
+
+/* ========================= 渲染：需求 ========================= */
+function renderRequests() {
+  const view = $('#view');
+  view.innerHTML = '';
+
+  const c = S.reqCounts || {};
+  view.append(el('div', { class: 'stats' },
+    statCard('待认领', c.open || 0, 'cy'),
+    statCard('进行中', c.claimed || 0, 'am'),
+    statCard('已完成', c.done || 0, 'gn'),
+    statCard('全部需求', Object.values(c).reduce((a, b) => a + b, 0), ''),
+  ));
+
+  if (!S.requests.length) {
+    view.append(emptyState({
+      icon: '✎',
+      title: '还没有视频需求',
+      message: '运营可以在这里发布「需要什么样的视频」，拍摄认领后交付，素材自动归到需求下',
+      action: el('button', { class: 'btn btn-primary', onclick: openRequestModal }, '＋ 发布第一条需求'),
+    }));
+    return;
+  }
+
+  const grid = el('div', { class: 'req-grid' });
+  for (const q of S.requests) {
+    grid.append(requestCard(q, {
+      me: S.user,
+      onOpen: () => openRequestDetail(q.id),
+      onClaim: () => claimRequest(q.id),
+    }));
+  }
+  view.append(grid);
+}
+
+/* ========================= 渲染：下载记录 ========================= */
+function renderRecords(items) {
+  const view = $('#view');
+  view.innerHTML = '';
+
+  if (!items.length) {
+    view.append(emptyState({
+      icon: '↓',
+      title: '还没有下载记录',
+      message: '运营在选片时点「下载」，这里会自动记下是谁、什么时候、拿了哪几条',
+    }));
+    return;
+  }
+
+  const batches = new Map();
+  for (const d of items) {
+    if (!batches.has(d.batch_id)) batches.set(d.batch_id, []);
+    batches.get(d.batch_id).push(d);
+  }
+
+  const head = el('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' } },
+    el('span', { class: 'mini-lbl' }, `最近 ${batches.size} 次下载 · 共 ${items.length} 条素材`),
+  );
+  view.append(head);
+
+  for (const [, batch] of batches) {
+    view.append(downloadBatch(batch, { onOpenVideo: id => openVideo(id) }));
+  }
+}
+
+/* ========================= 渲染：成员 ========================= */
+function renderMembers() {
+  const view = $('#view');
+  view.innerHTML = '';
+  view.append(el('div', { class: 'stats' },
+    statCard('成员', S.members.length, 'cy'),
+    statCard('今日下载', S.stats?.downloadsToday ?? 0, 'gn'),
+    statCard('评论总数', S.stats?.commentsTotal ?? 0, 'am'),
+    statCard('已评分素材', S.stats?.rated ?? 0, ''),
+  ));
+
+  const grid = el('div', { class: 'mem-grid' });
+  for (const u of S.members) {
+    const canManage = S.user.role === 'admin' && u.id !== S.user.id;
+    grid.append(el('div', { class: 'mem' },
+      avatar(u.name, u.color, 36),
+      el('div', { style: { minWidth: 0 } },
+        el('div', { class: 'mem-name' }, u.name, u.id === S.user.id
+          ? el('span', { style: { fontSize: '10px', color: 'var(--cy)', marginLeft: '6px' } }, '我')
+          : null),
+        el('div', { class: 'mem-role' }, { admin: '管理员', ops: '运营', shooter: '拍摄', viewer: '只读' }[u.role] || u.role),
+      ),
+      canManage
+        ? el('button', {
+            class: 'icon-btn',
+            title: '移除成员',
+            onclick: async () => {
+              if (!await confirmDialog({ title: '移除成员', message: `确认移除「${u.name}」？历史下载与评论记录会保留。`, confirmText: '移除', danger: true })) return;
+              try { await api('/users/' + u.id, { method: 'DELETE' }); toast('已移除'); loadMembers(); refreshStats(); }
+              catch (e) { toast(e.message, 'err'); }
+            },
+          }, '✕')
+        : null,
+    ));
+  }
+  view.append(grid);
+
+  view.append(el('div', { style: { marginTop: '18px' } },
+    el('button', { class: 'btn', onclick: openJoinModal }, '＋ 添加成员'),
+  ));
+}
+
+/* ---- 管理员添加成员 ---- */
+function openJoinModal() {
+  const name = el('input', { type: 'text', placeholder: '成员名字', maxlength: 24 });
+  const roleSel = el('select', {},
+    el('option', { value: 'ops' }, '运营（选片 / 下载 / 发需求）'),
+    el('option', { value: 'shooter' }, '拍摄（上传 / 认领需求）'),
+    el('option', { value: 'viewer' }, '只读（浏览 / 评论）'),
+    el('option', { value: 'admin' }, '管理员（管理成员）'),
+  );
+  const pw = el('input', { type: 'password', placeholder: '初始密码，至少 6 位', autocomplete: 'new-password' });
+
+  openModal({
+    title: '添加成员',
+    body: el('div', { class: 'modal-body' },
+      el('div', { class: 'field' }, el('label', {}, '名字（登录账号）'), name),
+      el('div', { class: 'field' }, el('label', {}, '角色'), roleSel),
+      el('div', { class: 'field' },
+        el('label', {}, '初始密码'),
+        pw,
+        el('p', { style: { fontSize: '10.5px', color: 'var(--tx3)', lineHeight: 1.6 } },
+          '把名字和密码告诉成员，对方登录后可以自行修改。'),
+      ),
+    ),
+    footer: [
+      el('button', { class: 'btn btn-ghost', onclick: () => closeModal() }, '取消'),
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: async () => {
+          if (!name.value.trim()) return toast('请填写名字', 'err');
+          if (pw.value.length < 6) return toast('密码至少 6 位', 'err');
+          try {
+            await api('/users', { method: 'POST', body: { name: name.value.trim(), role: roleSel.value, password: pw.value } });
+            closeModal();
+            toast('成员已添加');
+            loadMembers();
+            refreshStats();
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, '添加'),
+    ],
+  });
+  setTimeout(() => name.focus(), 60);
+}
+
+/* ========================= 选择 & 批量 ========================= */
+function toggleSelect(id) {
+  if (S.selected.has(id)) S.selected.delete(id);
+  else S.selected.add(id);
+  updateBulkBar();
+  const node = document.querySelector(`[data-id="${id}"]`);
+  if (node) {
+    node.classList.toggle('sel', S.selected.has(id));
+    node.querySelector('.cb')?.classList.toggle('on', S.selected.has(id));
+  }
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById('bulkbar');
+  if (!S.selected.size) { bar.hidden = true; return; }
+  bar.hidden = false;
+  document.getElementById('bulkNum').textContent = S.selected.size;
+}
+
+async function onBulkAction(e) {
+  const act = e.target.closest('button')?.dataset.act;
+  if (!act) return;
+  const ids = [...S.selected];
+  if (act === 'clear') {
+    S.selected.clear();
+    updateBulkBar();
+    renderList();
+    return;
+  }
+  if (act === 'rate') {
+    openBulkRate();
+    return;
+  }
+  if (act === 'pick') {
+    try {
+      await api('/videos/bulk-status', { method: 'POST', body: { ids, status: 'picked' } });
+      toast(`已标记 ${ids.length} 条为已选`);
+      S.selected.clear();
+      updateBulkBar();
+      reload();
+    } catch (err) { toast(err.message, 'err'); }
+    return;
+  }
+  if (act === 'library') {
+    try {
+      for (const id of ids) await api('/videos/' + id, { method: 'PATCH', body: { space: 'library' } });
+      toast(`已存入素材库 ${ids.length} 条`);
+      S.selected.clear();
+      updateBulkBar();
+      reload();
+      refreshStats();
+    } catch (err) { toast(err.message, 'err'); }
+    return;
+  }
+  if (act === 'zip') {
+    await doDownload(ids);
+  }
+}
+
+async function doDownload(ids, note = '') {
+  try {
+    toast(ids.length > 1 ? `正在打包 ${ids.length} 条素材…` : '开始下载…', 'ok', 1800);
+    const r = await api('/downloads', { method: 'POST', body: { videoIds: ids, note } });
+    const url = r.downloadUrl + '?uid=' + encodeURIComponent(S.user.id);
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    document.body.append(a);
+    a.click();
+    a.remove();
+    S.selected.clear();
+    updateBulkBar();
+    setTimeout(() => { reload(); refreshStats(); }, 1200);
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ========================= 抽屉：播放 + 详情 + 评论 ========================= */
+async function openVideo(id) {
+  const root = document.getElementById('drawer');
+  root.hidden = false;
+  root.innerHTML = '';
+  root.append(
+    el('div', { class: 'drawer-mask', onclick: closeDrawer }),
+    el('div', { class: 'drawer-panel' }, el('div', { style: { padding: '40px', textAlign: 'center' } }, el('span', { class: 'spin' }))),
+  );
+
+  let data;
+  try {
+    data = await api('/videos/' + id);
+  } catch (e) {
+    root.innerHTML = '';
+    root.append(el('div', { class: 'drawer-mask', onclick: closeDrawer }),
+      el('div', { class: 'drawer-panel' }, emptyState({ icon: '!', title: '打开失败', message: e.message })));
+    return;
+  }
+  renderDrawer(data);
+}
+
+function closeDrawer() {
+  const root = document.getElementById('drawer');
+  root.hidden = true;
+  root.innerHTML = '';
+}
+
+function renderDrawer({ video: v, comments, downloads, siblings }) {
+  const root = document.getElementById('drawer');
+  root.innerHTML = '';
+  const landscape = v.width > v.height;
+
+  const player = el('div', { class: 'player' + (landscape ? ' landscape' : '') });
+  const vidEl = el('video', {
+    src: mediaUrl(`/api/videos/${v.id}/stream`),
+    controls: true,
+    autoplay: true,
+    playsinline: true,
+    poster: v.thumb_path ? mediaUrl(`/api/videos/${v.id}/thumb`) : '',
+  });
+  player.append(vidEl);
+
+  const scroll = el('div', { class: 'drawer-scroll' });
+
+  // ---- 标题与规格 ----
+  const sec1 = el('div', { class: 'dsec' },
+    el('h3', { class: 'dtitle' }, v.title || v.orig_name),
+    el('div', { class: 'dmeta' },
+      el('span', {}, '⏱ ', el('b', {}, fmtDuration(v.duration))),
+      v.width ? el('span', {}, `${v.width}×${v.height}`) : null,
+      el('span', {}, fmtBytes(v.size)),
+      el('span', {}, `${v.shoot_date}`),
+      el('span', {}, v.source === 'scan' ? '目录投递' : '网页上传'),
+    ),
+    el('div', { class: 'dmeta', style: { marginTop: '8px' } },
+      avatarMini(v.uploader_name || '投递', v.uploader_color || '#5A6376'),
+      el('span', {}, v.uploader_name || '目录投递'),
+      el('span', { style: { opacity: .4 } }, '·'),
+      el('span', {}, `入库 ${timeAgo(v.created_at)}`),
+    ),
+    v.orig_name && v.orig_name !== v.title
+      ? el('div', { style: { fontSize: '10.5px', color: 'var(--tx3)', marginTop: '8px', wordBreak: 'break-all' } }, `原文件名：${v.orig_name}`)
+      : null,
+    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '10px' } },
+      el('span', { class: 'mini-lbl' }, '标签'),
+      v.tags
+        ? el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
+            ...v.tags.split(',').filter(Boolean).map(t => el('span', { class: 'pill' }, t)))
+        : el('span', { style: { fontSize: '11px', color: 'var(--tx3)' } }, '未打标签'),
+      el('button', { class: 'btn btn-ghost sm', onclick: () => openEditVideo(v) }, '编辑'),
+    ),
+  );
+
+  // ---- 操作 ----
+  const dlCount = downloads.length;
+  const lastDl = downloads[0];
+
+  const rateLabel = el('span', { class: 'rate-label' },
+    v.rating ? `${v.rating} 星` : '未评分');
+  const starsBox = el('div', { class: 'stars-lg' });
+  const paintStars = () => {
+    rateLabel.textContent = v.rating ? `${v.rating} 星` : '未评分';
+    starsBox.replaceChildren(...Array.from({ length: 5 }, (_, i) =>
+      el('button', {
+        class: v.rating > i ? 'on' : '',
+        title: `${i + 1} 星`,
+        onclick: async () => {
+          const next = v.rating === i + 1 ? 0 : i + 1;
+          v.rating = next;
+          paintStars();
+          try {
+            await api('/videos/' + v.id, { method: 'PATCH', body: { rating: next } });
+            if (S.filter === 'starred' || S.filter === 'star4') reload();
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, starIcon(20, v.rating > i))));
+  };
+  paintStars();
+
+  const actSec = el('div', { class: 'dsec' },
+    el('div', { class: 'rate-row' },
+      el('span', { class: 'mini-lbl' }, '评分'),
+      starsBox,
+      rateLabel,
+    ),
+    el('div', { class: 'dactions' },
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: () => doDownload([v.id]),
+      }, '↓ 下载'),
+      el('button', {
+        class: 'btn btn-ghost',
+        onclick: async () => {
+          const next = v.status === 'picked' ? 'new' : 'picked';
+          try {
+            await api('/videos/' + v.id, { method: 'PATCH', body: { status: next } });
+            v.status = next;
+            toast(next === 'picked' ? '已标记为已选' : '已取消标记');
+            closeDrawer();
+            reload();
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, v.status === 'picked' ? '★ 已选' : '☆ 标为已选'),
+      el('button', {
+        class: 'btn btn-ghost',
+        onclick: async () => {
+          try {
+            await api('/videos/' + v.id, { method: 'PATCH', body: { space: v.space === 'library' ? 'daily' : 'library' } });
+            toast(v.space === 'library' ? '已移回每日选片' : '已存入素材库');
+            closeDrawer();
+            reload();
+            refreshStats();
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, v.space === 'library' ? '移回每日' : '存素材库'),
+      el('button', {
+        class: 'btn btn-ghost',
+        onclick: () => openEditVideo(v),
+      }, '编辑'),
+    ),
+    el('div', { style: { marginTop: '12px', fontSize: '11.5px', color: 'var(--tx3)' } },
+      dlCount
+        ? el('span', {}, `已被下载 ${dlCount} 次`, lastDl ? el('span', { style: { color: 'var(--tx2)' } }, ` · 最近：${lastDl.user_name} ${timeAgo(lastDl.created_at)}`) : null)
+        : '还没有人下载这条素材',
+    ),
+  );
+
+  // ---- 评论 ----
+  const cmtList = el('div', {});
+  const renderComments = list => {
+    cmtList.innerHTML = '';
+    if (!list.length) {
+      cmtList.append(el('div', { style: { fontSize: '11.5px', color: 'var(--tx3)', padding: '14px 0' } }, '还没有评论，说说这条素材能不能用'));
+      return;
+    }
+    for (const c of list) {
+      cmtList.append(el('div', { class: 'cmt' },
+        avatar(c.user_name, c.user_color, 28),
+        el('div', { class: 'cmt-body' },
+          el('div', { class: 'cmt-top' },
+            el('span', { class: 'cmt-name' }, c.user_name),
+            el('span', { class: 'cmt-time' }, timeAgo(c.created_at)),
+            c.user_id === S.user.id || S.user.role === 'admin'
+              ? el('span', {
+                  class: 'cmt-del',
+                  onclick: async () => {
+                    try {
+                      await api('/comments/' + c.id, { method: 'DELETE' });
+                      renderComments(list.filter(x => x.id !== c.id));
+                    } catch (e) { toast(e.message, 'err'); }
+                  },
+                }, '删除')
+              : null,
+          ),
+          el('div', { class: 'cmt-text' }, c.body),
+        ),
+      ));
+    }
+  };
+  renderComments(comments);
+
+  const cmtSec = el('div', { class: 'dsec' },
+    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' } },
+      el('span', { class: 'mini-lbl' }, `评论 ${comments.length}`),
+    ),
+    cmtList,
+  );
+
+  scroll.append(player, sec1, actSec);
+  if (siblings?.length) {
+    scroll.append(el('div', { class: 'dsec' },
+      el('div', { class: 'mini-lbl', style: { marginBottom: '8px' } }, '同一需求下的其他素材'),
+      el('div', { style: { display: 'flex', gap: '8px', overflowX: 'auto' } },
+        ...siblings.map(s => el('div', {
+          style: { flex: '0 0 96px', cursor: 'pointer' },
+          onclick: () => openVideo(s.id),
+        },
+          el('div', { style: { width: '96px', height: '58px', borderRadius: '7px', overflow: 'hidden', background: '#0A0C11' } },
+            s.thumb_path ? el('img', { src: mediaUrl(`/api/videos/${s.id}/thumb`), style: { width: '100%', height: '100%', objectFit: 'cover' } }) : null),
+          el('div', { style: { fontSize: '10px', color: 'var(--tx3)', marginTop: '3px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.title),
+        )),
+      ),
+    ));
+  }
+  scroll.append(cmtSec);
+
+  // ---- 评论输入 ----
+  const input = el('textarea', { placeholder: '评论这条素材…（回车发送，Shift+回车换行）' });
+  const send = async () => {
+    const body = input.value.trim();
+    if (!body) return;
+    input.value = '';
+    try {
+      const r = await api(`/videos/${v.id}/comments`, { method: 'POST', body: { body } });
+      comments.push(r.comment);
+      renderComments(comments);
+      scroll.scrollTop = scroll.scrollHeight;
+    } catch (e) { toast(e.message, 'err'); input.value = body; }
+  };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  const form = el('div', { class: 'cmt-form' },
+    input,
+    el('button', { class: 'btn btn-primary', onclick: send }, '发送'),
+  );
+
+  root.append(
+    el('div', { class: 'drawer-mask', onclick: closeDrawer }),
+    el('div', { class: 'drawer-panel' },
+      el('div', { class: 'drawer-head' },
+        el('span', { class: 't' }, v.space === 'library' ? '素材库' : '每日选片'),
+        el('button', {
+          class: 'icon-btn',
+          title: '删除',
+          onclick: async () => {
+            if (!await confirmDialog({ title: '删除素材', message: '会同时删除服务器上的视频文件和所有评论记录，不可恢复。', confirmText: '删除', danger: true })) return;
+            try { await api('/videos/' + v.id, { method: 'DELETE' }); toast('已删除'); closeDrawer(); reload(); refreshStats(); }
+            catch (e) { toast(e.message, 'err'); }
+          },
+        }, icon('trash', 14)),
+        el('button', { class: 'icon-btn', onclick: closeDrawer }, '✕'),
+      ),
+      scroll,
+      form,
+    ),
+  );
+}
+
+/* ---- 编辑视频信息 ---- */
+function openEditVideo(v) {
+  const title = el('input', { type: 'text', value: v.title || '', maxlength: 120 });
+  const tags = el('input', { type: 'text', value: v.tags || '', placeholder: '用逗号分隔，例如：厨房,爆款脚本' });
+  const date = el('input', { type: 'date', value: v.shoot_date });
+  const space = el('select', {},
+    el('option', { value: 'daily' }, '每日选片'),
+    el('option', { value: 'library' }, '素材库'),
+  );
+  space.value = v.space;
+
+  openModal({
+    title: '编辑素材信息',
+    body: el('div', { class: 'modal-body' },
+      el('div', { class: 'field' }, el('label', {}, '标题'), title),
+      el('div', { class: 'field' }, el('label', {}, '标签（逗号分隔）'), tags),
+      el('div', { class: 'field-row' },
+        el('div', { class: 'field' }, el('label', {}, '拍摄日期'), date),
+        el('div', { class: 'field' }, el('label', {}, '所属空间'), space),
+      ),
+    ),
+    footer: [
+      el('button', { class: 'btn btn-ghost', onclick: () => closeModal() }, '取消'),
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: async () => {
+          try {
+            await api('/videos/' + v.id, {
+              method: 'PATCH',
+              body: { title: title.value, tags: tags.value, shootDate: date.value, space: space.value },
+            });
+            closeModal();
+            closeDrawer();
+            toast('已保存');
+            reload();
+            refreshStats();
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, '保存'),
+    ],
+  });
+}
+
+/* ========================= 需求 ========================= */
+function openRequestModal() {
+  const title = el('input', { type: 'text', placeholder: '例如：需要 3 条厨房收纳的痛点开场', maxlength: 80 });
+  const brief = el('textarea', { placeholder: '具体要什么：产品、场景、时长、出镜要求、参考视频…' });
+  const priority = el('select', {},
+    el('option', { value: 'normal' }, '普通'),
+    el('option', { value: 'high' }, '紧急'),
+    el('option', { value: 'low' }, '不着急'),
+  );
+  const platform = el('select', {},
+    el('option', {}, 'TikTok'), el('option', {}, 'TikTok Shop'), el('option', {}, '通用素材'),
+  );
+  const due = el('input', { type: 'date' });
+  const tags = el('input', { type: 'text', placeholder: '用逗号分隔，例如：厨房,开箱' });
+
+  openModal({
+    title: '发布视频需求',
+    wide: true,
+    body: el('div', { class: 'modal-body' },
+      el('div', { class: 'field' }, el('label', {}, '需求标题'), title),
+      el('div', { class: 'field' }, el('label', {}, '具体描述'), brief),
+      el('div', { class: 'field-row' },
+        el('div', { class: 'field' }, el('label', {}, '优先级'), priority),
+        el('div', { class: 'field' }, el('label', {}, '截止日期'), due),
+      ),
+      el('div', { class: 'field-row' },
+        el('div', { class: 'field' }, el('label', {}, '投放平台'), platform),
+        el('div', { class: 'field' }, el('label', {}, '标签'), tags),
+      ),
+    ),
+    footer: [
+      el('button', { class: 'btn btn-ghost', onclick: () => closeModal() }, '取消'),
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: async () => {
+          if (!title.value.trim()) return toast('请填写标题', 'err');
+          try {
+            await api('/requests', {
+              method: 'POST',
+              body: {
+                title: title.value, brief: brief.value, priority: priority.value,
+                platform: platform.value, dueDate: due.value, tags: tags.value,
+              },
+            });
+            closeModal();
+            toast('需求已发布');
+            S.reqFilter = 'active';
+            renderToolbar();
+            loadRequests();
+            refreshStats();
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, '发布'),
+    ],
+  });
+  setTimeout(() => title.focus(), 60);
+}
+
+async function openRequestDetail(id) {
+  let data;
+  try { data = await api('/requests/' + id); } catch (e) { return toast(e.message, 'err'); }
+  const q = data.request;
+  const mine = data.claims.some(c => c.id === S.user.id);
+
+  const body = el('div', { class: 'modal-body' },
+    el('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap' } },
+      el('span', { class: `pill ${q.status}` },
+        { open: '待认领', claimed: '进行中', done: '已完成', closed: '已关闭' }[q.status]),
+      q.priority === 'high' ? el('span', { class: 'pill high' }, '紧急') : null,
+      q.due_date ? el('span', { class: 'pill' }, `截止 ${q.due_date}`) : null,
+      el('span', { class: 'pill' }, q.platform),
+    ),
+    el('h3', { style: { fontSize: '17px', fontWeight: 650, lineHeight: 1.4 } }, q.title),
+    q.brief ? el('p', { style: { fontSize: '12.5px', color: 'var(--tx2)', lineHeight: 1.75, marginTop: '10px', whiteSpace: 'pre-wrap' } }, q.brief) : null,
+    q.tags ? el('div', { style: { display: 'flex', gap: '6px', marginTop: '12px', flexWrap: 'wrap' } },
+      ...q.tags.split(',').filter(Boolean).map(t => el('span', { class: 'pill' }, t))) : null,
+    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '16px', fontSize: '11.5px', color: 'var(--tx3)' } },
+      avatarMini(q.creator_name, q.creator_color),
+      el('span', {}, `${q.creator_name} 发起 · ${timeAgo(q.created_at)}`),
+    ),
+    data.claims.length
+      ? el('div', { style: { marginTop: '14px' } },
+          el('div', { class: 'mini-lbl', style: { marginBottom: '6px' } }, `认领 ${data.claims.length} 人`),
+          el('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } },
+            ...data.claims.map(c => el('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11.5px', color: 'var(--tx2)' } },
+              avatarMini(c.name, c.color), c.name))))
+      : el('div', { style: { marginTop: '14px', fontSize: '11.5px', color: 'var(--tx3)' } }, '还没有人认领'),
+    data.videos.length
+      ? el('div', { style: { marginTop: '16px' } },
+          el('div', { class: 'mini-lbl', style: { marginBottom: '8px' } }, `已交付 ${data.videos.length} 条`),
+          el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(88px,1fr))', gap: '8px' } },
+            ...data.videos.map(v => el('div', {
+              style: { cursor: 'pointer' },
+              onclick: () => { closeModal(); openVideo(v.id); },
+            },
+              el('div', { style: { aspectRatio: '16/10', borderRadius: '7px', overflow: 'hidden', background: '#0A0C11' } },
+                v.thumb_path ? el('img', { src: mediaUrl(`/api/videos/${v.id}/thumb`), style: { width: '100%', height: '100%', objectFit: 'cover' } }) : null),
+              el('div', { style: { fontSize: '9.5px', color: 'var(--tx3)', marginTop: '3px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, v.title),
+            )),
+          ),
+        )
+      : null,
+  );
+
+  const footer = [];
+  if (['open', 'claimed'].includes(q.status)) {
+    footer.push(el('button', {
+      class: 'btn ' + (mine ? 'btn-ghost' : 'btn-primary'),
+      onclick: async () => {
+        try {
+          await api(`/requests/${q.id}/claim`, { method: 'POST', body: { action: mine ? 'quit' : 'join' } });
+          closeModal();
+          toast(mine ? '已取消认领' : '已认领，撸起袖子干');
+          loadRequests();
+          refreshStats();
+        } catch (e) { toast(e.message, 'err'); }
+      },
+    }, mine ? '取消认领' : '我来拍'));
+  }
+  if (mine || S.user.role === 'admin' || q.created_by === S.user.id) {
+    footer.push(el('button', {
+      class: 'btn btn-ghost',
+      onclick: async () => {
+        try {
+          await api('/requests/' + q.id, { method: 'PATCH', body: { status: q.status === 'done' ? 'claimed' : 'done' } });
+          closeModal();
+          toast(q.status === 'done' ? '已重新打开' : '已标记完成');
+          loadRequests();
+          refreshStats();
+        } catch (e) { toast(e.message, 'err'); }
+      },
+    }, q.status === 'done' ? '重新打开' : '标记完成'));
+  }
+  footer.push(el('button', {
+    class: 'btn btn-ghost',
+    onclick: async () => {
+      const action = await confirmDialog({
+        title: '上传交付素材',
+        message: '将跳转到上传面板，上传的视频会自动关联到这条需求。',
+        confirmText: '去上传',
+      });
+      if (action) { closeModal(); openUploader({ requestId: q.id }); }
+    },
+  }, '上传交付'));
+  if (q.created_by === S.user.id || S.user.role === 'admin') {
+    footer.push(el('button', {
+      class: 'btn btn-danger',
+      onclick: async () => {
+        if (!await confirmDialog({ title: '删除需求', message: '需求会被删除，已关联的素材不受影响。', confirmText: '删除', danger: true })) return;
+        try { await api('/requests/' + q.id, { method: 'DELETE' }); closeModal(); toast('已删除'); loadRequests(); refreshStats(); }
+        catch (e) { toast(e.message, 'err'); }
+      },
+    }, '删除'));
+  }
+
+  openModal({ title: '需求详情', body, footer, wide: true });
+}
+
+function claimRequest(id) {
+  api(`/requests/${id}/claim`, { method: 'POST', body: { action: 'join' } })
+    .then(() => { toast('已认领'); loadRequests(); refreshStats(); })
+    .catch(e => toast(e.message, 'err'));
+}
+
+/* ========================= 上传 ========================= */
+function openUploader(opts = {}) {
+  const root = document.getElementById('uploader');
+  root.hidden = false;
+  root.innerHTML = '';
+
+  const fileInput = el('input', { type: 'file', accept: 'video/*', multiple: true, style: { display: 'none' } });
+  const fileList = el('div', { class: 'up-list' });
+  const progress = el('div', { class: 'progress', style: { display: 'none' } }, el('i', {}));
+  let files = [];
+
+  const space = el('select', {},
+    el('option', { value: 'daily' }, '每日选片（拍摄投递）'),
+    el('option', { value: 'library' }, '素材库（通用素材）'),
+  );
+  if (S.view === 'library') space.value = 'library';
+
+  const date = el('input', { type: 'date', value: ymd() });
+  const tags = el('input', { type: 'text', placeholder: '逗号分隔，例如：厨房,开箱' });
+
+  const drop = el('div', {
+    class: 'drop',
+    onclick: () => fileInput.click(),
+    ondragover: e => { e.preventDefault(); drop.classList.add('over'); },
+    ondragleave: () => drop.classList.remove('over'),
+    ondrop: e => {
+      e.preventDefault();
+      drop.classList.remove('over');
+      addFiles([...e.dataTransfer.files]);
+    },
+  },
+    el('div', { class: 'big' }, '↑'),
+    el('b', {}, '拖视频到这里，或点击选择'),
+    el('span', {}, '支持 mp4 / mov / mkv / avi，可多选'),
+  );
+
+  function addFiles(list) {
+    files = [...files, ...list.filter(f => f.type.startsWith('video/') || /\.(mp4|mov|m4v|mkv|avi|webm|flv)$/i.test(f.name))];
+    renderFiles();
+  }
+
+  function renderFiles() {
+    fileList.innerHTML = '';
+    files.forEach((f, i) => {
+      fileList.append(el('div', { class: 'up-item' },
+        el('span', { class: 'nm' }, f.name),
+        el('span', { class: 'sz' }, fmtBytes(f.size)),
+        el('button', {
+          class: 'icon-btn', style: { width: '20px', height: '20px', fontSize: '11px' },
+          onclick: () => { files.splice(i, 1); renderFiles(); },
+        }, '✕'),
+      ));
+    });
+  }
+
+  const submitBtn = el('button', { class: 'btn btn-primary' }, '开始上传');
+  submitBtn.addEventListener('click', async () => {
+    if (!files.length) return toast('先选择视频文件', 'err');
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="spin"></span> 上传中';
+    progress.style.display = '';
+    try {
+      const r = await uploadFiles({
+        files, space: space.value, shootDate: date.value,
+        requestId: opts.requestId || '', tags: tags.value,
+        onProgress: p => { progress.firstChild.style.width = Math.round(p * 100) + '%'; },
+      });
+      toast(`上传完成：新增 ${r.added} 条${r.duplicates ? `，${r.duplicates} 条重复已跳过` : ''}${r.failed?.length ? `，${r.failed.length} 条失败` : ''}`);
+      closeUploader();
+      if (r.added && space.value !== S.space) {
+        switchView(space.value === 'library' ? 'library' : 'daily');
+      } else {
+        reload();
+      }
+      refreshStats();
+    } catch (e) {
+      toast(e.message, 'err');
+      submitBtn.disabled = false;
+      submitBtn.textContent = '开始上传';
+      progress.style.display = 'none';
+    }
+  });
+
+  const card = el('div', { class: 'modal-card wide' },
+    el('div', { class: 'modal-head' },
+      el('h3', {}, opts.requestId ? '上传交付素材' : '上传视频'),
+      el('button', { class: 'icon-btn', onclick: closeUploader }, '✕'),
+    ),
+    el('div', { class: 'modal-body' },
+      drop,
+      fileInput,
+      fileList,
+      progress,
+      el('div', { style: { height: '14px' } }),
+      el('div', { class: 'field-row' },
+        el('div', { class: 'field' }, el('label', {}, '归属'), space),
+        el('div', { class: 'field' }, el('label', {}, '拍摄日期'), date),
+      ),
+      el('div', { class: 'field' }, el('label', {}, '标签'), tags),
+      opts.requestId ? el('div', { style: { fontSize: '11px', color: 'var(--cy)' } }, '✓ 将自动关联到当前需求') : null,
+    ),
+    el('div', { class: 'modal-foot' },
+      el('button', { class: 'btn btn-ghost', onclick: closeUploader }, '取消'),
+      submitBtn,
+    ),
+  );
+
+  root.innerHTML = '';
+  root.append(el('div', { class: 'modal-mask', onclick: closeUploader }), card);
+  fileInput.addEventListener('change', () => addFiles([...fileInput.files]));
+}
+
+function closeUploader() {
+  const root = document.getElementById('uploader');
+  root.hidden = true;
+  root.innerHTML = '';
+}
+
+/* ========================= 扫描 ========================= */
+async function runScan() {
+  const btn = document.getElementById('scanBtn');
+  btn.disabled = true;
+  btn.textContent = '扫描中…';
+  try {
+    const r = await api('/scan', { method: 'POST' });
+    const res = r.result;
+    if (res.error) toast(`扫描失败：${res.error}`, 'err', 4000);
+    else if (res.skipped) toast('已有扫描在进行中');
+    else toast(`扫描完成：目录 ${res.scanned} 个视频，新增 ${res.added} 条${res.duplicate ? `，跳过重复 ${res.duplicate}` : ''}${res.failed ? `，失败 ${res.failed}` : ''}`, 'ok', 3600);
+    reload();
+    refreshStats();
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '立即扫描投递目录';
+  }
+}
+
+// 全局快捷键
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (!document.getElementById('drawer').hidden) closeDrawer();
+    else if (!document.getElementById('modal').hidden) closeModal();
+    else if (!document.getElementById('uploader').hidden) closeUploader();
+  }
+});
