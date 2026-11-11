@@ -8,9 +8,11 @@ const { uuid, ymd, safeName } = require('./util');
 
 const insertVideo = db.prepare(`
   INSERT INTO videos (id,space,title,orig_name,file_path,thumb_path,mime,size,duration,width,height,
-                      shoot_date,source,src_path,uploader_id,status,tags,request_id,dedupe_key,created_at,updated_at)
+                      shoot_date,source,src_path,uploader_id,status,tags,request_id,dedupe_key,created_at,updated_at,
+                      codec,pix_fmt,fps,has_audio,qc_status)
   VALUES (@id,@space,@title,@orig_name,@file_path,@thumb_path,@mime,@size,@duration,@width,@height,
-          @shoot_date,@source,@src_path,@uploader_id,@status,@tags,@request_id,@dedupe_key,@created_at,@updated_at)
+          @shoot_date,@source,@src_path,@uploader_id,@status,@tags,@request_id,@dedupe_key,@created_at,@updated_at,
+          @codec,@pix_fmt,@fps,@has_audio,'pending')
 `);
 
 async function copyAcross(src, dest) {
@@ -104,6 +106,10 @@ async function ingest(opts) {
     dedupe_key: key,
     created_at: now,
     updated_at: now,
+    codec: meta?.codec || null,
+    pix_fmt: meta?.pixFmt || null,
+    fps: meta?.fps || null,
+    has_audio: meta ? (meta.hasAudio ? 1 : 0) : 1,
   };
   try {
     insertVideo.run(row);

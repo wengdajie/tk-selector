@@ -52,6 +52,29 @@ export function thumb(v, cls = '') {
   );
 }
 
+export const QC_LABELS = {
+  noaudio: '无音轨', lowres: '分辨率偏低', lowbitrate: '码率偏低', quiet: '响度偏低',
+  loud: '响度偏高', letterbox: '有黑边', frozen: '画面静止', tooshort: '时长过短',
+  toolong: '时长过长', noth264: '非 H.264', blackframes: '含黑场', qcfailed: '体检失败',
+};
+
+export const qcFlags = v => String(v.qc_flags || '').split(',').filter(Boolean);
+
+export function qcBadges(v) {
+  const rows = [];
+  if (v.qc_status === 'done' && v.qc_score != null && v.qc_score < 80) {
+    const labels = qcFlags(v).map(f => QC_LABELS[f] || f);
+    rows.push(el('span', {
+      class: 'flag warn',
+      title: `体检 ${v.qc_score} 分：${labels.join('、') || '存在风险'}`,
+    }, `⚠ ${labels[0] || '体检异常'}`));
+  }
+  if (v.sim_of) {
+    rows.push(el('span', { class: 'flag dup', title: `与已有素材高度相似（距离 ${v.sim_dist ?? '?'}）` }, '疑似重复'));
+  }
+  return rows.length ? el('div', { class: 'card-flags' }, ...rows) : null;
+}
+
 export function videoCard(v, { selected = false, onToggle, onOpen, onRate }) {
   const card = el('article', {
     class: 'card' + (selected ? ' sel' : ''),
@@ -105,6 +128,7 @@ export function videoCard(v, { selected = false, onToggle, onOpen, onRate }) {
         el('h3', { class: 'card-title' }, v.title || v.orig_name),
         stars,
       ),
+      qcBadges(v),
       el('div', { class: 'card-meta' },
         el('span', { class: 'who' },
           avatarMini(v.uploader_name || (v.source === 'scan' ? '投递' : '—'), v.uploader_color || '#5A6376'),

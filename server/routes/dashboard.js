@@ -78,6 +78,13 @@ r.get('/dashboard', requireUser, (req, res) => {
   const storageBytes = one('SELECT COALESCE(SUM(size),0) c FROM videos');
   const pickedCount = one("SELECT COUNT(*) c FROM videos WHERE status='picked'");
 
+  // 投放体检
+  const qcPending = one("SELECT COUNT(*) c FROM videos WHERE qc_status='pending'");
+  const qcBad = one("SELECT COUNT(*) c FROM videos WHERE qc_status='done' AND qc_score < 80");
+  const qcOk = one("SELECT COUNT(*) c FROM videos WHERE qc_status='done' AND qc_score >= 80");
+  const qcAvg = Number(val("SELECT ROUND(AVG(qc_score),1) v FROM videos WHERE qc_status='done'"));
+  const simCount = one('SELECT COUNT(*) c FROM videos WHERE sim_of IS NOT NULL');
+
   // 近 7 天有行为的成员（上传/评论/下载/评分/认领）
   const activeMembers = one(`
     SELECT COUNT(DISTINCT uid) c FROM (
@@ -202,6 +209,7 @@ r.get('/dashboard', requireUser, (req, res) => {
       comments: { total: commentsTotal, today: commentsToday, week: commentsWeek, prevWeek: commentsPrevWeek, videos: commentedVideos },
       downloads: { total: downloadsTotal, today: downloadsToday, week: downloadsWeek, prevWeek: downloadsPrevWeek, videos: downloadedVideos },
       ratings: { rated: ratedCount, avg: avgRating, five: fiveStar, fourPlus, coverage: videosTotal ? Math.round(ratedCount / videosTotal * 100) : 0 },
+      qc: { pending: qcPending, bad: qcBad, ok: qcOk, avg: qcAvg, similar: simCount },
       members, activeMembers, storageBytes,
     },
     trend,

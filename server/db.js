@@ -109,6 +109,22 @@ const migrations = [
   ['users', 'password_hash', 'ALTER TABLE users ADD COLUMN password_hash TEXT'],
   ['videos', 'rating', 'ALTER TABLE videos ADD COLUMN rating INTEGER NOT NULL DEFAULT 0'],
   ['videos', 'rated_by', 'ALTER TABLE videos ADD COLUMN rated_by TEXT'],
+  // ---- v1.3：投放体检（QC）与感知去重 ----
+  ['videos', 'codec', 'ALTER TABLE videos ADD COLUMN codec TEXT'],
+  ['videos', 'pix_fmt', 'ALTER TABLE videos ADD COLUMN pix_fmt TEXT'],
+  ['videos', 'fps', 'ALTER TABLE videos ADD COLUMN fps REAL'],
+  ['videos', 'has_audio', 'ALTER TABLE videos ADD COLUMN has_audio INTEGER NOT NULL DEFAULT 1'],
+  ['videos', 'lufs', 'ALTER TABLE videos ADD COLUMN lufs REAL'],
+  ['videos', 'peak_db', 'ALTER TABLE videos ADD COLUMN peak_db REAL'],
+  ['videos', 'black_pct', 'ALTER TABLE videos ADD COLUMN black_pct REAL'],
+  ['videos', 'freeze_pct', 'ALTER TABLE videos ADD COLUMN freeze_pct REAL'],
+  ['videos', 'crop', 'ALTER TABLE videos ADD COLUMN crop TEXT'],
+  ['videos', 'qc_status', "ALTER TABLE videos ADD COLUMN qc_status TEXT NOT NULL DEFAULT 'pending'"],
+  ['videos', 'qc_flags', "ALTER TABLE videos ADD COLUMN qc_flags TEXT NOT NULL DEFAULT ''"],
+  ['videos', 'qc_score', 'ALTER TABLE videos ADD COLUMN qc_score INTEGER'],
+  ['videos', 'phash', 'ALTER TABLE videos ADD COLUMN phash TEXT'],
+  ['videos', 'sim_of', 'ALTER TABLE videos ADD COLUMN sim_of TEXT'],
+  ['videos', 'sim_dist', 'ALTER TABLE videos ADD COLUMN sim_dist INTEGER'],
 ];
 for (const [table, col, sql] of migrations) {
   if (!hasColumn(table, col)) {

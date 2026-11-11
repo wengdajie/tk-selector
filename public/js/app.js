@@ -4,7 +4,7 @@ import {
   fmtDate, timeAgo, dayLabel, ymd, avatar, avatarMini, emptyState, skeleton, debounce, initials,
   roleLabel, animateNumber, delta, shortDate, weekdayOf,
 } from './util.js';
-import { videoCard, videoRow, requestCard, downloadBatch, statCard, icon, starIcon } from './render.js';
+import { videoCard, videoRow, requestCard, downloadBatch, statCard, icon, starIcon, QC_LABELS, qcFlags } from './render.js';
 
 /* ========================= 主题 ========================= */
 const THEME_KEY = 'tk.theme';
@@ -440,6 +440,7 @@ const FILTERS = [
   ['picked', '已选'],
   ['starred', '已标星'],
   ['star4', '4星+'],
+  ['qcBad', '体检异常'],
   ['hasComments', '有评论'],
 ];
 
@@ -486,7 +487,33 @@ function renderFilterBar() {
   }, S.layout === 'grid' ? '▤ 列表' : '▦ 卡片');
   bar.append(layoutBtn);
 
+  bar.append(el('button', {
+    class: 'btn btn-ghost sm',
+    title: '按当前筛选导出 CSV 清单（投放 / 剪辑交接用）',
+    onclick: exportCurrent,
+  }, '↓ 导出清单'));
+
   return bar;
+}
+
+/** 按当前筛选条件导出 CSV */
+function exportCurrent() {
+  const p = new URLSearchParams({ space: S.space, uid: S.user.id });
+  if (S.from) p.set('from', S.from);
+  if (S.to) p.set('to', S.to);
+  if (!S.from && !S.to && S.date) p.set('date', S.date);
+  if (S.q) p.set('q', S.q);
+  if (S.tag) p.set('tag', S.tag);
+  if (S.filter === 'qcBad') p.set('qc', 'bad');
+  if (S.filter === 'starred') p.set('starred', '1');
+  if (S.filter === 'star4') p.set('minRating', '4');
+  const a = document.createElement('a');
+  a.href = '/api/export.csv?' + p;
+  a.rel = 'noopener';
+  document.body.append(a);
+  a.click();
+  a.remove();
+  toast('正在导出当前筛选结果');
 }
 
 const REQ_FILTERS = [['active', '进行中'], ['open', '待认领'], ['done', '已完成'], ['all', '全部']];
@@ -577,6 +604,7 @@ function renderDashboard(d) {
     el('div', { class: 'greeting-side' },
       el('div', {}, el('b', {}, String(k.requests.open + k.requests.claimed)), el('span', {}, '待处理需求')),
       el('div', {}, el('b', {}, String(k.activeMembers)), el('span', {}, '近 7 天活跃')),
+      el('div', {}, el('b', {}, String(k.members)), el('span', {}, '团队成员')),
     ),
   ));
 
@@ -587,7 +615,7 @@ function renderDashboard(d) {
     kpiCard({ cls: 'pk', ico: 'comment', label: '评论总数', value: k.comments.total, unit: '条', deltaInfo: delta(k.comments.week, k.comments.prevWeek), foot: '较上周' }),
     kpiCard({ cls: 'cy', ico: 'download', label: '下载次数', value: k.downloads.total, unit: '次', deltaInfo: delta(k.downloads.week, k.downloads.prevWeek), foot: '较上周' }),
     kpiCard({ cls: 'gn', ico: 'check', label: '已完成需求', value: k.requests.done, unit: '个', deltaInfo: delta(k.requests.doneWeek, k.requests.donePrevWeek), foot: `共 ${k.requests.total} 个` }),
-    kpiCard({ ico: 'users', label: '团队成员', value: k.members, unit: '人', foot: `${k.activeMembers} 人近 7 天有动作` }),
+    kpiCard({ cls: 'pk', ico: 'flame', label: '体检异常素材', value: k.qc.bad, unit: '条', foot: `平均 ${k.qc.avg || 0} 分 · 待检 ${k.qc.pending} · 相似 ${k.qc.similar}` }),
   ));
 
   // ---- 趋势 ----
@@ -775,6 +803,7 @@ async function loadVideos(append = false) {
   if (S.filter === 'hasComments') p.set('hasComments', '1');
   if (S.filter === 'starred') p.set('starred', '1');
   if (S.filter === 'star4') p.set('minRating', '4');
+  if (S.filter === 'qcBad') p.set('qc', 'bad');
 
   try {
     const data = await api('/videos?' + p);
@@ -1181,6 +1210,26 @@ async function onBulkAction(e) {
     } catch (err) { toast(err.message, 'err'); }
     return;
   }
+  if (act === 'qc') {
+    try {
+      await api('/videos/bulk-qc', { method: 'POST', body: { ids } });
+      toast(`已加入体检队列（${ids.length} 条），稍后刷新可见结果`);
+      S.selected.clear();
+      updateBulkBar();
+    } catch (err) { toast(err.message, 'err'); }
+    return;
+  }
+  if (act === 'export') {
+    const url = `/api/export.csv?ids=${ids.join(',')}&uid=${encodeURIComponent(S.user.id)}`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    document.body.append(a);
+    a.click();
+    a.remove();
+    toast(`已导出 ${ids.length} 条素材清单`);
+    return;
+  }
   if (act === 'zip') {
     await doDownload(ids);
   }
@@ -1231,7 +1280,7 @@ function closeDrawer() {
   root.innerHTML = '';
 }
 
-function renderDrawer({ video: v, comments, downloads, siblings }) {
+function renderDrawer({ video: v, comments, downloads, siblings, similar }) {
   const root = document.getElementById('drawer');
   root.innerHTML = '';
   const landscape = v.width > v.height;
@@ -1351,6 +1400,64 @@ function renderDrawer({ video: v, comments, downloads, siblings }) {
     ),
   );
 
+  // ---- 投放体检 ----
+  const flags = qcFlags(v);
+  const scoreCls = v.qc_score == null ? '' : v.qc_score >= 80 ? 'good' : v.qc_score >= 60 ? 'mid' : 'bad';
+  const cell = (label, value, hint) => el('div', { class: 'qc-cell', title: hint || '' },
+    el('b', {}, value), el('span', {}, label));
+
+  const recheck = async () => {
+    toast('正在体检，稍等…', 'ok', 1500);
+    try {
+      await api(`/videos/${v.id}/qc`, { method: 'POST' });
+      const fresh = await api('/videos/' + v.id);
+      renderDrawer(fresh);
+      reload();
+      toast('体检完成');
+    } catch (e) { toast(e.message, 'err'); }
+  };
+
+  const qcSec = el('div', { class: 'dsec' },
+    el('div', { class: 'qc-head' },
+      el('div', { class: `qc-score ${scoreCls}` }, v.qc_status === 'pending' ? '…' : (v.qc_score == null ? '—' : String(v.qc_score))),
+      el('div', { style: { flex: 1, minWidth: 0 } },
+        el('div', { class: 'qc-title' },
+          v.qc_status === 'pending' ? '排队体检中'
+            : v.qc_status === 'failed' ? '体检失败（文件可能读不了）'
+              : v.qc_score >= 80 ? '各项正常，可以投放'
+                : v.qc_score >= 60 ? '有风险项，建议处理后投放'
+                  : '问题较多，不建议直接投放'),
+        el('div', { class: 'qc-sub' },
+          flags.length ? flags.map(f => QC_LABELS[f] || f).join(' · ') : '未发现明显问题'),
+      ),
+      el('button', { class: 'btn btn-ghost sm', onclick: recheck }, '重新体检'),
+    ),
+    el('div', { class: 'qc-grid' },
+      cell('响度 LUFS', v.has_audio === 0 ? '无音轨' : (v.lufs == null ? '—' : Number(v.lufs).toFixed(1)), 'EBU R128 建议 -16 ~ -12'),
+      cell('峰值 dB', v.peak_db == null ? '—' : Number(v.peak_db).toFixed(1), '避免削波'),
+      cell('黑边', flags.includes('letterbox') ? (v.crop || '有') : '无', '实际画面区域小于原尺寸 92% 判为有黑边'),
+      cell('静止占比', `${Math.round(v.freeze_pct || 0)}%`, '超过 15% 会拉低完播'),
+      cell('编码', v.codec ? `${v.codec}${v.codec === 'h264' ? '' : ' ⚠'}` : '—', '浏览器原生支持 H.264'),
+      cell('帧率', v.fps ? `${Number(v.fps).toFixed(1)}` : '—', ''),
+    ),
+    similar && similar.length
+      ? el('div', { style: { marginTop: '12px' } },
+          el('div', { class: 'mini-lbl', style: { marginBottom: '7px' } }, `相似素材 ${similar.length}`),
+          el('div', { class: 'sim-row' },
+            ...similar.map(s => el('div', {
+              class: 'sim-item',
+              title: s.sim_dist != null ? `画面距离 ${s.sim_dist}` : '',
+              onclick: () => openVideo(s.id),
+            },
+              el('div', { class: 'th' },
+                s.thumb_path ? el('img', { src: mediaUrl(`/api/videos/${s.id}/thumb`), loading: 'lazy', alt: '' }) : null),
+              el('p', {}, s.title || s.orig_name || '—'),
+            )),
+          ),
+        )
+      : null,
+  );
+
   // ---- 评论 ----
   const cmtList = el('div', {});
   const renderComments = list => {
@@ -1392,7 +1499,7 @@ function renderDrawer({ video: v, comments, downloads, siblings }) {
     cmtList,
   );
 
-  scroll.append(player, sec1, actSec);
+  scroll.append(player, sec1, actSec, qcSec);
   if (siblings?.length) {
     scroll.append(el('div', { class: 'dsec' },
       el('div', { class: 'mini-lbl', style: { marginBottom: '8px' } }, '同一需求下的其他素材'),

@@ -58,6 +58,12 @@ function buildFilter(qs) {
   if (qs.minRating) add('v.rating >= @minRating', 'minRating', Number(qs.minRating));
   if (qs.starred === '1') add('v.rating > 0', 'starred', 1);
 
+  // 投放体检筛选
+  if (qs.qc === 'bad') add('(v.qc_status = \'done\' AND v.qc_score < 80)', 'qcBad', 1);
+  if (qs.qc === 'ok') add('(v.qc_status = \'done\' AND v.qc_score >= 80)', 'qcOk', 1);
+  if (qs.qc === 'pending') add("v.qc_status = 'pending'", 'qcPend', 1);
+  if (qs.similar === '1') add('v.sim_of IS NOT NULL', 'sim', 1);
+
   return { clause: where.length ? `WHERE ${where.join(' AND ')}` : '', params: p };
 }
 
@@ -123,7 +129,13 @@ r.get('/videos/:id', requireUser, (req, res) => {
     ? db.prepare('SELECT id,title,thumb_path,duration FROM videos WHERE request_id = ? AND id <> ? LIMIT 8')
         .all(v.request_id, v.id)
     : [];
-  res.json({ video: v, comments, downloads, siblings });
+  // 相似素材：它指向的 + 指向它的
+  const similar = db.prepare(`
+    SELECT id, title, orig_name, thumb_path, duration, rating, sim_dist FROM videos
+    WHERE id = ? OR sim_of = ?
+    ORDER BY (id = ?) DESC LIMIT 6
+  `).all(v.sim_of || '', v.id, v.sim_of || '');
+  res.json({ video: v, comments, downloads, siblings, similar });
 });
 
 r.get('/videos/:id/stream', requireUser, (req, res) => {
@@ -248,6 +260,67 @@ r.post('/videos/bulk-status', requireUser, (req, res) => {
   const tx = db.transaction(() => ids.forEach(id => stmt.run(status, now, id)));
   tx();
   res.json({ ok: true, count: ids.length });
+});
+
+/** 单条素材立即体检（详情页按钮） */
+r.post('/videos/:id/qc', requireUser, async (req, res) => {
+  try {
+    const { runOne } = require('../lib/qcworker');
+    const out = await runOne(req.params.id);
+    if (!out.ok) return res.status(404).json({ error: out.error });
+    res.json({ video: out.video });
+  } catch (e) {
+    res.status(500).json({ error: e.message || '体检失败' });
+  }
+});
+
+/** 批量体检：把选中的素材重新排队 */
+r.post('/videos/bulk-qc', requireUser, (req, res) => {
+  const ids = (req.body?.ids || []).filter(Boolean);
+  if (!ids.length) return res.status(400).json({ error: '未选择视频' });
+  const stmt = db.prepare("UPDATE videos SET qc_status='pending' WHERE id = ?");
+  const tx = db.transaction(() => ids.forEach(id => stmt.run(id)));
+  tx();
+  require('../lib/qcworker').tick().catch(() => {});
+  res.json({ ok: true, count: ids.length });
+});
+
+/** 选片清单导出（投放 / 剪辑交接用） */
+r.get('/export.csv', requireUser, (req, res) => {
+  const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
+  let rows;
+  if (ids.length) {
+    const marks = ids.map(() => '?').join(',');
+    rows = db.prepare(`${LIST_SELECT} WHERE v.id IN (${marks}) ORDER BY v.shoot_date DESC, v.created_at DESC`).all(...ids);
+  } else {
+    const { clause, params } = buildFilter(req.query);
+    rows = db.prepare(`${LIST_SELECT} ${clause} ORDER BY v.shoot_date DESC, v.created_at DESC LIMIT 500`).all(params);
+  }
+
+  const FLAG_LABEL = {
+    noaudio: '无音轨', lowres: '分辨率偏低', lowbitrate: '码率偏低', quiet: '响度偏低',
+    loud: '响度偏高', letterbox: '有黑边', frozen: '画面静止', tooshort: '时长过短',
+    toolong: '时长过长', noth264: '非H.264', blackframes: '含黑场', qcfailed: '体检失败',
+  };
+  const head = ['素材ID', '标题', '拍摄日期', '时长(秒)', '分辨率', '编码', '码率(kbps)', '帧率',
+    '评分', '评论数', '下载次数', '体检分', '体检问题', '疑似重复', '上传人', '原文件名'];
+  const lines = [head.join(',')];
+  for (const v of rows) {
+    const flags = String(v.qc_flags || '').split(',').filter(Boolean).map(f => FLAG_LABEL[f] || f).join(' / ');
+    lines.push([
+      v.id, v.title || '', v.shoot_date || '', Math.round(v.duration || 0),
+      v.width && v.height ? `${v.width}x${v.height}` : '',
+      v.codec || '', Math.round((v.bitrate || 0) / 1000), v.fps || '',
+      v.rating || 0, v.comment_count || 0, v.download_count || 0,
+      v.qc_score == null ? '' : v.qc_score, flags,
+      v.sim_of ? '是' : '', v.uploader_name || '', v.orig_name || '',
+    ].map(x => `"${String(x).replace(/"/g, '""')}"`).join(','));
+  }
+  const csv = '\uFEFF' + lines.join('\r\n');
+  const name = `TK选片清单_${ymd()}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="tk-selection-${ymd()}.csv"; filename*=UTF-8''${encodeURIComponent(name)}`);
+  res.send(csv);
 });
 
 module.exports = r;

@@ -129,6 +129,47 @@ environment:
 
 「存入素材库」把好用的通用素材从每日池子挪到长期库，所有人可上传、可搜索、可打标签。
 
+### 投放体检（自动 QC）
+
+每条素材入库后会在后台自动跑一遍体检，**不影响上传速度**（队列每 20 秒处理 2 条）：
+
+| 检查项 | 判定 | 为什么重要 |
+|---|---|---|
+| 无音轨 | 没有音频流 | 信息流素材几乎必须有声音 |
+| 分辨率偏低 | 短边 < 720 | 竖屏投放会糊 |
+| 码率偏低 | 720p+ 但码率 < 900kbps | 快速运动画面糊成一团 |
+| 响度偏离 | < -24 LUFS 或 > -9 LUFS | 平台按 -14 LUFS 左右归一化 |
+| 黑边 | 实际画面 < 原尺寸 92% | 竖屏要裁满，否则浪费展示位 |
+| 黑场 / 静止 | 黑帧 > 6% / 静止 > 15% | 直接影响完播率 |
+| 时长异常 | < 3 秒 或 > 3 分钟 | 信息流不适合 |
+| 非 H.264 | 编码不是 h264 | 浏览器可能放不了，需要转码 |
+
+综合成 **0-100 体检分**，卡片上出现 `⚠ 原因`，详情页有完整指标和「重新体检」按钮；筛选栏有「体检异常」，批量操作条有「重新体检」。
+
+```bash
+# 低功耗 NAS 上可以关掉体检（默认开启）
+QC_ENABLED=0
+```
+
+> 首次升级到 1.3 时，历史素材会被重新体检一遍（2 条/20 秒），期间 NAS 会有一点 CPU 占用，属正常。
+
+### 重复素材识别（感知哈希）
+
+文件级 MD5 只能识别「同一个文件」，识别不了转码、改分辨率、改名、剪掉片头的版本。所以额外对每条素材按 25%/50%/75% 抽 3 帧，缩到 9×8 灰度算 **dHash**：
+
+- 时长相差在 5%（至少 1 秒）以内才比较
+- 至少 2 帧命中、最小汉明距离 ≤ 6 才判定为重复
+- 命中的素材在卡片上标「疑似重复」，详情页列出相似素材
+
+实测：把一条视频转成 480×270 / CRF 32 后上传，MD5 完全不同，但被准确识别为同一素材（距离 0）。
+
+### 导出选片清单
+
+- 勾选多条 → 底部操作条「导出清单」
+- 或者筛选栏右侧「↓ 导出清单」，按当前筛选（日期 / 标签 / 评分 / 体检异常）导出
+
+CSV 带 BOM，Excel 直接打开不乱码，字段包括：素材 ID、标题、拍摄日期、时长、分辨率、编码、码率、帧率、评分、评论数、下载次数、**体检分**、**体检问题**、疑似重复、上传人、原文件名 —— 直接交接给投放和剪辑。
+
 ### 视频需求
 
 运营在「视频需求」里发布需求（标题、描述、优先级、截止日期、标签）。
@@ -218,6 +259,7 @@ data/
 | `ADMIN_PASSWORD` | tkadmin2026 | 内置管理员初始密码，也是历史无密码账号的初始化密码 |
 | `ACCESS_CODE` | 空 | 设置后新增/删除成员需输入口令 |
 | `MAX_UPLOAD_MB` | 4096 | 单文件上传上限 |
+| `QC_ENABLED` | 1 | 投放体检后台队列开关，`0` 关闭（低功耗 NAS 想省 CPU 时可关） |
 | `TZ` | Asia/Shanghai | 时区，影响「今天」的判定 |
 
 ## 本地开发
@@ -300,6 +342,30 @@ docker restart tk-selector
 
 **Q：仪表盘数据不准 / 是空的？**
 仪表盘所有数字都是查询时实时聚合的，没有缓存。空库自然全是 0；如果和预期不符，先确认容器时区是 `Asia/Shanghai`（`TZ` 环境变量），「今天」的边界依赖它。
+
+## 设计参考
+
+选片台的 QC 判定、去重策略是参照这些开源项目的做法定的，不是拍脑袋：
+
+| 项目 | 借鉴点 |
+|---|---|
+| [StippieDot/VideoCull](https://github.com/StippieDot/VideoCull) | 本地视频批量筛选工具：多帧缩略图、键盘快速取舍、按「精确 + 视觉相似」两档去重 |
+| [asophila/videodedup](https://github.com/asophila/videodedup) | 先用 CRC/SHA 判完全相同，再用感知哈希判相似；按时长分组降低比较量 |
+| [memedup](https://pkg.go.dev/github.com/painhardcore/memedup) | 视频按比例抽帧（25/50/75%）、时长容差、最佳配对 + quorum 判定，避免片头差异导致漏判 |
+| [pHash](https://github.com/asenat/phash) / [shennguyenrs/duplicate-video-finder](https://github.com/shennguyenrs/duplicate-video-finder) | dHash/PHash 的位宽、阈值经验（阈值必须按自己的数据调，不能照抄） |
+| [rendiffdev/rendiff-probe](https://github.com/rendiffdev/rendiff-probe)、[mediadeepa](https://github.com/mediaexmachina/mediadeepa) | 用 FFmpeg 滤镜做专业 QC：blackdetect / freezedetect / cropdetect / ebur128 / silencedetect 一次解码跑完 |
+| [Clapshot](https://github.com/ruuda/clapshot)、[freeframe](https://github.com/Techiebutler/freeframe) | 自托管审片：时间码评论、逐帧步进、可分享审片链接 |
+| [social-auto-upload](https://github.com/dreammis/social-auto-upload) | 抖音 / TikTok / 小红书多平台定时发布，是「选片 → 发布」链路的下一环 |
+| [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo)、[ClipForge](https://github.com/xixihhhh/clipforge) | AI 生成/剪辑带货短视频，是「选片 → 生产」链路的另一环 |
+| [ffmpeg-skill](https://github.com/kajisho5/ffmpeg-skill) | 工程化思路：先 probe 再执行、能流复制就不重编码、执行后必须校验（check/look） |
+
+## 后续可做（按收益排序）
+
+1. **时间码评论**：评论绑定到 `mm:ss`，播放器自动跳转（Clapshot / freeframe 的做法），审片反馈比现在精确得多
+2. **按需转码代理**：非 H.264 / 10bit 素材自动生成 720p H.264 预览，原文件仍用于下载（现在只标记「非 H.264」，还没转）
+3. **多帧预览条**：详情页把 6-9 帧拼成一张雪碧图，鼠标滑过即预览（VideoCull 的做法）
+4. **AI 打标与脚本结构分析**：Whisper 转写 → 卖点/开场钩子/CTA 识别，自动生成标签和卖点摘要
+5. **发布对接**：选中的素材一键推到 social-auto-upload 的发布队列，形成「选片 → 发布 → 回传数据」闭环
 
 ## 技术栈
 

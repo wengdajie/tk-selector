@@ -102,6 +102,7 @@ app.listen(config.port, config.host, () => {
   console.log(`  媒体目录   ${config.mediaDir}`);
   console.log(`  扫描目录   ${config.scanDir} (${config.scanMode})`);
   scanner.startScheduler();
+  try { require('./lib/qcworker').start(); } catch (e) { console.warn('[qc] 启动失败:', e.message); }
 });
 
 module.exports = app;

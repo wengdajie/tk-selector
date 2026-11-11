@@ -25,13 +25,27 @@ async function probe(file) {
     ], 30_000);
     const j = JSON.parse(out);
     const v = (j.streams || []).find(s => s.codec_type === 'video') || {};
+    const a = (j.streams || []).find(s => s.codec_type === 'audio');
     const duration = Number(j.format?.duration || v.duration || 0);
+    // 帧率可能是 "30000/1001" 这种分数
+    let fps = 0;
+    const fpsRaw = v.avg_frame_rate && v.avg_frame_rate !== '0/0' ? v.avg_frame_rate : v.r_frame_rate;
+    if (fpsRaw && String(fpsRaw).includes('/')) {
+      const [n, d] = String(fpsRaw).split('/').map(Number);
+      fps = d ? n / d : 0;
+    } else {
+      fps = Number(fpsRaw) || 0;
+    }
     return {
       duration: Number.isFinite(duration) ? duration : 0,
       width: Number(v.width || 0),
       height: Number(v.height || 0),
       codec: v.codec_name || '',
+      pixFmt: v.pix_fmt || '',
+      fps: Number.isFinite(fps) ? Number(fps.toFixed(3)) : 0,
       bitrate: Number(j.format?.bit_rate || 0),
+      videoBitrate: Number(v.bit_rate || 0),
+      hasAudio: !!a,
     };
   } catch (e) {
     console.warn('[media] ffprobe 失败，元数据降级为空:', path.basename(file), String(e.message).slice(0, 120));
