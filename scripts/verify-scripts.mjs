@@ -106,9 +106,10 @@ const mock = http.createServer((req, res) => {
     }
     let body = {};
     try { body = JSON.parse(buf || '{}'); } catch { /* ignore */ }
-    const content = body.messages?.at(-1)?.content || [];
+    const rawContent = body.messages?.at(-1)?.content ?? [];
+    const content = Array.isArray(rawContent) ? rawContent : [];   // 深度测试发的是纯字符串 content
     const images = content.filter(c => c.type === 'image_url');
-    const prompt = content.find(c => c.type === 'text')?.text || '';
+    const prompt = content.find(c => c.type === 'text')?.text || String(rawContent);
     seen.push({ model: body.model, images: images.length, hasPrompt: !!prompt, prompt });
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
@@ -578,6 +579,43 @@ nfd3.append('title', '关开关后上传');
 await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: nfd3 });
 await sleep(900);
 ok(hooks.length === 6, '关闭总开关后上传不推送', String(hooks.length));
+
+// ---- v1.7.1：AI 接口方案 / 深度连接测试 ----
+console.log('\n== v1.7.1 AI 方案与连接测试 ==');
+const deepOk = await call('/settings/ai/test?deep=1', { uid });
+ok(deepOk.data.reachable === true && deepOk.data.modelOk === true,
+  '深度测试：连通 + Key + 模型一起验证通过', JSON.stringify(deepOk.data).slice(0, 200));
+ok(String(deepOk.data.modelEcho || '').includes('mock'), '深度测试返回模型回显', String(deepOk.data.modelEcho));
+
+// 「不开放 /models」的厂商（火山方舟等 404）：浅探仍算连通，模型靠真实调用验证
+const mock2 = http.createServer((req, res) => {
+  let buf = '';
+  req.on('data', c => { buf += c; });
+  req.on('end', () => {
+    if (req.url.includes('/models')) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      return res.end('{}');
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ model: 'mock2-vision', choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+  });
+});
+await new Promise(r => mock2.listen(0, '127.0.0.1', r));
+extraClosers.push(() => mock2.close());
+const m2port = mock2.address().port;
+
+const swapBase = await call('/settings/ai', { method: 'PUT', uid, body: { ai_base_url: `http://127.0.0.1:${m2port}/v1` } });
+ok(swapBase.status === 200, '切到自定义接口地址');
+const shallow2 = await call('/settings/ai/test', { uid });
+ok(shallow2.data.reachable === true && (shallow2.data.models || []).length === 0,
+  '「不提供 /models」的接口浅探也算连通', JSON.stringify(shallow2.data).slice(0, 160));
+const deep2 = await call('/settings/ai/test?deep=1', { uid });
+ok(deep2.data.modelOk === true && deep2.data.modelEcho === 'mock2-vision',
+  '无 /models 时深度测试仍能验出模型', JSON.stringify(deep2.data).slice(0, 200));
+// 切回原中转站
+await call('/settings/ai', { method: 'PUT', uid, body: { ai_base_url: `http://127.0.0.1:${aiPort}/v1` } });
+const back = await call('/settings/ai/test', { uid });
+ok(back.data.reachable === true && (back.data.models || []).includes('mock-vision'), '切回后恢复原方案');
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 if (fail) console.log('\n服务端日志片段：\n' + log.slice(-1500));

@@ -113,8 +113,12 @@ async function chat({ system, prompt, images = [], json = true }) {
   };
 }
 
-/** 连通性自检：拉模型列表（不是所有中转站都开放，失败也算正常） */
-async function status() {
+/**
+ * 连通性自检。
+ * shallow：拉模型列表（不是所有厂商都开放 /models，404/405 视为「不提供列表」而非不可达）。
+ * deep（测试按钮用）：再对当前模型发一次 max_tokens 极小的真实调用，验证 Key + 模型可用。
+ */
+async function status({ deep = false } = {}) {
   const ai = settings.getAi();
   const info = {
     enabled: ai.enabled,
@@ -124,8 +128,11 @@ async function status() {
     reachable: false,
     models: null,
     error: null,
+    modelOk: null,
+    modelError: null,
   };
   if (!ai.enabled) return info;
+
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 8000);
@@ -134,15 +141,58 @@ async function status() {
       signal: ctrl.signal,
     });
     clearTimeout(t);
-    info.reachable = res.ok;
     if (res.ok) {
+      info.reachable = true;
       const j = await res.json().catch(() => null);
       info.models = (j?.data || []).map(m => m.id).slice(0, 60);
+    } else if (res.status === 404 || res.status === 405) {
+      // 火山方舟 / 部分中转模型型列表不开放 /models：接口本身在，只是没这个路由
+      info.reachable = true;
+      info.models = [];
     } else {
       info.error = `HTTP ${res.status}`;
     }
   } catch (e) {
     info.error = e?.name === 'AbortError' ? '连接超时（8 秒无响应）' : String(e.message).slice(0, 160);
+  }
+
+  // 深度测试：对当前模型做一次最小真实调用（Key 与模型名都能验出来，消耗个位数 token）
+  if (deep && info.reachable) {
+    if (!ai.apiKey) {
+      info.modelError = '未配置 API Key';
+    } else if (!ai.model) {
+      info.modelError = '未配置模型';
+    } else {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 20000);
+        const res = await fetch(ai.baseUrl + '/chat/completions', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${ai.apiKey}` },
+          body: JSON.stringify({
+            model: ai.model,
+            messages: [{ role: 'user', content: '收到请只回复：ok' }],
+            max_tokens: 8,
+          }),
+          signal: ctrl.signal,
+        });
+        clearTimeout(t);
+        if (res.ok) {
+          const j = await res.json().catch(() => null);
+          info.modelOk = true;
+          info.modelEcho = j?.model || ai.model;
+        } else {
+          const body = await res.text().catch(() => '');
+          let detail = body.slice(0, 160);
+          try { detail = JSON.parse(body)?.error?.message || detail; } catch { /* keep raw */ }
+          info.modelOk = false;
+          info.modelError = `HTTP ${res.status}：${detail}`;
+        }
+      } catch (e) {
+        info.modelOk = false;
+        info.modelError = e?.name === 'AbortError' ? '模型响应超时（20 秒）' : String(e.message).slice(0, 160);
+      }
+    }
   }
   return info;
 }

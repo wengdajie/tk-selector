@@ -1025,6 +1025,46 @@ async function loadSettings() {
   }
 }
 
+/* ---- AI 接口预设方案（国内外主流厂商 + 自定义；全部走 OpenAI 兼容协议） ---- */
+const AI_PRESETS = [
+  { id: 'grsai', label: 'grsai 中转站（默认）', baseUrl: 'https://api.grsai.com/v1',
+    models: ['gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4', 'gemini-2.5-flash'],
+    keyHint: '在 grsai.com 控制台生成 API Key；一个 Key 能用多家模型，适合不想分别充值的情况' },
+  { id: 'openai', label: 'OpenAI 官方', baseUrl: 'https://api.openai.com/v1',
+    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1-mini'],
+    keyHint: 'platform.openai.com 生成 Key；国内直连不稳，建议 NAS 配代理或改用中转站' },
+  { id: 'deepseek', label: 'DeepSeek（深度求索）', baseUrl: 'https://api.deepseek.com/v1',
+    models: ['deepseek-chat', 'deepseek-reasoner'],
+    keyHint: 'platform.deepseek.com 生成 Key；注意：DeepSeek 暂无视觉模型，拆解图片请选其他方案' },
+  { id: 'dashscope', label: '阿里通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    models: ['qwen-vl-max', 'qwen-vl-plus', 'qwen2.5-vl-72b-instruct'],
+    keyHint: '阿里云百炼控制台（兼容模式入口）生成 Key；拆解选 qwen-vl 视觉模型' },
+  { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    models: ['glm-4.5v', 'glm-4v-plus', 'glm-4-flash'],
+    keyHint: 'open.bigmodel.cn 生成 Key；拆解选 glm-4v / glm-4.5v 系视觉模型' },
+  { id: 'moonshot', label: '月之暗面 Kimi', baseUrl: 'https://api.moonshot.cn/v1',
+    models: ['moonshot-v1-8k-vision-preview', 'kimi-latest'],
+    keyHint: 'platform.moonshot.cn 生成 Key；拆解选 vision 系模型' },
+  { id: 'ark', label: '火山方舟（豆包）', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    models: ['doubao-1.5-vision-pro-32k', 'doubao-seed-1.6-flash'],
+    keyHint: '火山方舟控制台生成 Key；模型名也可以填接入点 ID（ep-xxxx）' },
+  { id: 'gemini', label: 'Google Gemini（OpenAI 兼容层）', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    models: ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'],
+    keyHint: 'aistudio.google.com 生成 Key；国内访问需代理' },
+  { id: 'openrouter', label: 'OpenRouter（海外聚合）', baseUrl: 'https://openrouter.ai/api/v1',
+    models: ['openai/gpt-4o', 'google/gemini-2.5-flash', 'anthropic/claude-sonnet-4'],
+    keyHint: 'openrouter.ai 生成 Key；模型要写 厂商/模型名 格式' },
+  { id: 'siliconflow', label: '硅基流动 SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1',
+    models: ['Qwen/Qwen2.5-VL-72B-Instruct', 'Qwen/Qwen2.5-VL-32B-Instruct'],
+    keyHint: 'cloud.siliconflow.cn 生成 Key；Qwen-VL 系有免费额度' },
+  { id: 'custom', label: '自定义（任意 OpenAI 兼容接口）', baseUrl: '',
+    models: [],
+    keyHint: '填任意 OpenAI 兼容服务的 base URL（到 /v1 这一级，结尾不带 /chat/completions），模型与 Key 按该服务的要求填' },
+];
+const aiPresetBy = url => AI_PRESETS.find(
+  p => p.baseUrl && p.baseUrl === String(url || '').replace(/\/+$/, '')
+);
+
 function renderSettings(d, nd) {
   const view = $('#view');
   view.innerHTML = '';
@@ -1038,26 +1078,69 @@ function renderSettings(d, nd) {
 
   const statusChip = el('span', { class: 'pill' }, '…');
   const modelList = el('datalist', { id: 'aiModelList' });
+  const applyModelList = list => {
+    if ((list || []).length) modelList.replaceChildren(...list.slice(0, 40).map(x => el('option', { value: x })));
+  };
+  const chip = (cls, text, title) => {
+    statusChip.className = 'pill ' + cls;
+    statusChip.textContent = text;
+    statusChip.title = title || '';
+  };
+
+  // 进页面只做轻探（不花 token）：地址通不通、能拉到模型列表
   const refreshStatus = async () => {
     statusChip.textContent = '检测中…';
     statusChip.className = 'pill';
     try {
       const st = await api('/settings/ai/test');
-      if (!st.enabled) { statusChip.className = 'pill closed'; statusChip.textContent = '已关闭'; return; }
-      statusChip.className = 'pill ' + (st.reachable ? 'done' : 'high');
-      statusChip.textContent = st.reachable ? `连通正常 · ${(st.models || []).length} 个模型` : (st.error || '不可达');
+      if (!st.enabled) return chip('closed', '已关闭');
+      if (!st.reachable) return chip('high', st.error || '不可达');
       if ((st.models || []).length) {
-        modelList.replaceChildren(...st.models.slice(0, 40).map(x => el('option', { value: x })));
+        applyModelList(st.models);
+        chip('done', `连通正常 · ${st.models.length} 个模型`);
+      } else {
+        chip('done', '连通正常（接口未提供模型列表）');
       }
-    } catch (e) {
-      statusChip.className = 'pill high';
-      statusChip.textContent = e.message;
-    }
+    } catch (e) { chip('high', e.message); }
+  };
+
+  // 「测试连接」按钮：连 Key、带模型做一次极小真实调用，几十个 token 以内
+  const deepTest = async () => {
+    statusChip.textContent = '测试中…（连通 + 模型一起验）';
+    statusChip.className = 'pill';
+    try {
+      const st = await api('/settings/ai/test?deep=1');
+      if (!st.enabled) return chip('closed', '已关闭');
+      if (!st.reachable) return chip('high', `连不上：${st.error || '不可达'}`);
+      if ((st.models || []).length) applyModelList(st.models);
+      if (st.modelOk) chip('done', `连通 ✓ 模型 ✓（${st.modelEcho || st.model}）`);
+      else chip('high', `连通 ✓ 模型 ✗：${st.modelError || '模型不可用'}`, st.modelError);
+    } catch (e) { chip('high', e.message); }
   };
   refreshStatus();
 
+  // 接口方案：预设下拉（当前地址能对上哪个厂商就选哪个，对不上 = 自定义）
+  const presetSel = el('select', { disabled: !canEdit },
+    ...AI_PRESETS.map(p => el('option', { value: p.id }, p.label)));
+  const curPreset = aiPresetBy(d.baseUrl);
+  presetSel.value = curPreset?.id || 'custom';
+  applyModelList(curPreset?.models);
+  const presetHint = el('p', { class: 'sethint' },
+    curPreset?.keyHint || AI_PRESETS[AI_PRESETS.length - 1].keyHint);
+
   const baseUrl = el('input', { value: d.baseUrl || '', disabled: !canEdit, placeholder: 'https://api.grsai.com/v1' });
   const model = el('input', { value: d.model || '', list: 'aiModelList', disabled: !canEdit, placeholder: 'gpt-4o' });
+  presetSel.addEventListener('change', () => {
+    const p = AI_PRESETS.find(x => x.id === presetSel.value) || AI_PRESETS[AI_PRESETS.length - 1];
+    if (p.baseUrl) baseUrl.value = p.baseUrl;
+    presetHint.textContent = p.keyHint;
+    applyModelList(p.models);
+    // 切厂商时旧模型名基本必然失效：换成该方案的推荐模型，用户可再改
+    if (p.models?.length && !p.models.includes(model.value.trim())) {
+      model.value = p.models[0];
+      toast(`已带出推荐模型 ${p.models[0]}，保存后生效`, 'ok', 3600);
+    }
+  });
   const apiKey = el('input', {
     type: 'password', autocomplete: 'new-password', disabled: !canEdit,
     placeholder: d.apiKeyMasked ? `当前 ${d.apiKeyMasked}（留空 = 保持不变）` : 'sk-…（不填则无法拆解）',
@@ -1109,26 +1192,36 @@ function renderSettings(d, nd) {
 
   const form = el('div', { class: 'setform' },
     el('div', { class: 'setstat' },
-      el('span', { class: 'mini-lbl' }, '中转站状态'),
+      el('span', { class: 'mini-lbl' }, 'AI 接口状态'),
       statusChip,
-      el('button', { class: 'btn btn-ghost sm', onclick: refreshStatus }, '↻ 重新检测'),
+      canEdit ? el('button', { class: 'btn btn-ghost sm', title: '连通 + API Key + 当前模型各验一遍（消耗几十个 token）', onclick: deepTest }, '⚡ 测试连接') : null,
       el('span', { style: { flex: 1 } }),
       d.apiKeyMasked ? el('span', { class: 'pill' }, `Key ${d.apiKeyMasked}`) : el('span', { class: 'pill high' }, '未配 Key'),
     ),
     el('div', { class: 'field-row' },
       el('div', { class: 'field' },
-        el('label', {}, '接入地址（OpenAI 兼容）', srcDot('ai_base_url')),
-        baseUrl),
+        el('label', {}, '接口方案（国内外厂商 / 自定义）', srcDot('ai_base_url')),
+        presetSel,
+        presetHint),
       el('div', { class: 'field' },
-        el('label', {}, '模型（需支持图片输入）', srcDot('ai_model')),
-        model, modelList),
+        el('label', {}, '接入地址（OpenAI 兼容）', srcDot('ai_base_url')),
+        baseUrl,
+        el('p', { class: 'sethint' }, '选方案自动带出；也可以直接改地址（改了就按自定义算）。'),
+      ),
     ),
     el('div', { class: 'field-row' },
+      el('div', { class: 'field' },
+        el('label', {}, '模型（需支持图片输入）', srcDot('ai_model')),
+        model, modelList,
+        el('p', { class: 'sethint' }, '选方案自动带出推荐模型，下拉来自「测试连接」拉到的列表。'),
+      ),
       el('div', { class: 'field' },
         el('label', {}, 'API Key', srcDot('ai_api_key')),
         el('div', { class: 'pw-wrap' }, apiKey, keyEye),
         el('p', { class: 'sethint' }, '只存本机数据库、不下发给浏览器；留空保存表示保持不变。'),
       ),
+    ),
+    el('div', { class: 'field-row' },
       el('div', { class: 'field' },
         el('label', {}, '每条视频抽几张关键帧', srcDot('ai_frames')),
         framesSel,
@@ -1149,7 +1242,7 @@ function renderSettings(d, nd) {
       '规则：环境变量（AI_BASE_URL / AI_API_KEY / AI_MODEL / AI_FRAMES）是出厂默认；这里保存过的项优先生效，改完立即生效、无需重启容器。'),
   );
 
-  view.append(panel('AI 脚本拆解', '中转站 · 模型 · 密钥，管理员统一管理', form));
+  view.append(panel('AI 脚本拆解', '各大厂商接口方案 · 模型 · 密钥，管理员统一管理', form));
   if (nd) view.append(renderNotifyPanel(nd));
 }
 

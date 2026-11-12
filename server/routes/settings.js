@@ -81,9 +81,9 @@ r.put('/settings/ai', requireUser, requireAdmin, (req, res) => {
   });
 });
 
-/** 连通性测试（与脚本库里的 AI 状态一致） */
+/** 连通性测试（与脚本库里的 AI 状态一致）；?deep=1 会再对当前模型做一次最小真实调用 */
 r.get('/settings/ai/test', requireUser, async (req, res) => {
-  res.json(await ai.status());
+  res.json(await ai.status({ deep: req.query.deep === '1' }));
 });
 
 /* ========================= 群通知（webhook） ========================= */
