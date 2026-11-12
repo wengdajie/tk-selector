@@ -12,7 +12,7 @@ const COLORS = ['#25F4EE', '#FE2C55', '#FFC24B', '#3DDC97', '#9B8CFF', '#FF8A5B'
 const ROLE_LABEL = { admin: '管理员', ops: '运营', shooter: '拍摄', viewer: '只读' };
 const SELF_SIGNUP_ROLES = ['ops', 'shooter', 'viewer'];
 
-const PUBLIC_FIELDS = `id,name,role,color,active,created_at,
+const PUBLIC_FIELDS = `id,name,role,color,active,created_at,notify_key,
   CASE WHEN password_hash IS NOT NULL AND password_hash <> '' THEN 1 ELSE 0 END AS has_password`;
 
 const MIN_PASSWORD = 6;
@@ -155,7 +155,11 @@ r.patch('/users/:id', requireUser, requireAdmin, (req, res) => {
   const name = req.body?.name !== undefined ? String(req.body.name).trim().slice(0, 24) : u.name;
   const role = Object.keys(ROLE_LABEL).includes(req.body?.role) ? req.body.role : u.role;
   if (!name) return res.status(400).json({ error: '名字不能为空' });
-  db.prepare('UPDATE users SET name = ?, role = ? WHERE id = ?').run(name, role, u.id);
+  // 通知账号：群机器人在群里真实艾特这个人用的标识（企业微信 userid / 钉钉手机号 / 飞书 user_id）
+  const notifyKey = req.body?.notify_key !== undefined
+    ? String(req.body.notify_key).trim().slice(0, 64) : u.notify_key;
+  db.prepare('UPDATE users SET name = ?, role = ?, notify_key = ? WHERE id = ?')
+    .run(name, role, notifyKey || null, u.id);
   res.json({ user: db.prepare(`SELECT ${PUBLIC_FIELDS} FROM users WHERE id = ?`).get(u.id) });
 });
 

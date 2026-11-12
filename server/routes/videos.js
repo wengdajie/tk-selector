@@ -6,6 +6,7 @@ const multer = require('multer');
 const db = require('../db');
 const config = require('../config');
 const media = require('../lib/media');
+const notify = require('../lib/notify');
 const { ingest } = require('../lib/store');
 const { requireUser } = require('../middleware');
 const { uuid, ymd, safeName } = require('../lib/util');
@@ -204,6 +205,8 @@ r.post('/videos/upload', requireUser, (req, res) => {
         try { fs.unlinkSync(f.path); } catch { /* ignore */ }
       }
     }
+    // 群通知：新素材入库（fire-and-forget，失败只记日志）
+    if (added.length) notify.onUpload(added, req.user);
     res.status(added.length ? 201 : 200).json({
       added: added.length, duplicates: duplicates.length, failed,
       items: added,

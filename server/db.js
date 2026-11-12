@@ -162,6 +162,8 @@ const migrations = [
   // ---- v1.5.1：脚本补充动作 / 拍摄设定 / AI 复刻提示词 ----
   ['scripts', 'shot_setup', "ALTER TABLE scripts ADD COLUMN shot_setup TEXT NOT NULL DEFAULT ''"],
   ['scripts', 'replicate_prompt', "ALTER TABLE scripts ADD COLUMN replicate_prompt TEXT NOT NULL DEFAULT ''"],
+  // ---- v1.7：群通知（评论 @人员 → 群里真实艾特，需成员的外部账号标识）----
+  ['users', 'notify_key', 'ALTER TABLE users ADD COLUMN notify_key TEXT'],
 ];
 for (const [table, col, sql] of migrations) {
   if (!hasColumn(table, col)) {

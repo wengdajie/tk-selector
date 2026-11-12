@@ -3,11 +3,12 @@ const express = require('express');
 const db = require('../db');
 const { requireUser } = require('../middleware');
 const { uuid } = require('../lib/util');
+const notify = require('../lib/notify');
 
 const r = express.Router();
 
 r.post('/videos/:id/comments', requireUser, (req, res) => {
-  const v = db.prepare('SELECT id FROM videos WHERE id = ?').get(req.params.id);
+  const v = db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id);
   if (!v) return res.status(404).json({ error: '视频不存在' });
   const body = String(req.body?.body || '').trim().slice(0, 2000);
   if (!body) return res.status(400).json({ error: '评论内容不能为空' });
@@ -19,6 +20,8 @@ r.post('/videos/:id/comments', requireUser, (req, res) => {
     SELECT c.*, u.name AS user_name, u.color AS user_color
     FROM comments c LEFT JOIN users u ON u.id = c.user_id WHERE c.id = ?
   `).get(id);
+  // 群通知（含 @人员艾特）：fire-and-forget，失败只记日志
+  notify.onComment({ body, video: v, author: req.user });
   res.status(201).json({ comment: c });
 });
 

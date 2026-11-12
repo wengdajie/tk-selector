@@ -1015,14 +1015,17 @@ async function loadMembers() {
 async function loadSettings() {
   $('#view').replaceChildren(skeleton(2));
   try {
-    const data = await api('/settings/ai');
-    if (S.view === 'settings') renderSettings(data);
+    const [ai, notify] = await Promise.all([
+      api('/settings/ai'),
+      api('/settings/notify').catch(() => null),
+    ]);
+    if (S.view === 'settings') renderSettings(ai, notify);
   } catch (e) {
     $('#view').replaceChildren(emptyState({ icon: '!', title: '设置加载失败', message: e.message }));
   }
 }
 
-function renderSettings(d) {
+function renderSettings(d, nd) {
   const view = $('#view');
   view.innerHTML = '';
   const canEdit = !!d.canEdit;
@@ -1147,6 +1150,131 @@ function renderSettings(d) {
   );
 
   view.append(panel('AI 脚本拆解', '中转站 · 模型 · 密钥，管理员统一管理', form));
+  if (nd) view.append(renderNotifyPanel(nd));
+}
+
+/* ---- 群通知面板（企业微信 / 飞书 / 钉钉 webhook） ---- */
+function renderNotifyPanel(d) {
+  const canEdit = !!d.canEdit;
+  const src = d.sources || {};
+  const srcDot = key => el('i', {
+    class: 'src-dot' + (src[key] === 'db' ? ' on' : ''),
+    title: src[key] === 'db' ? '正在用管理员设置值' : '环境变量默认值',
+  });
+
+  const typeSel = el('select', { disabled: !canEdit },
+    el('option', { value: 'wecom' }, '企业微信群机器人'),
+    el('option', { value: 'feishu' }, '飞书自定义机器人'),
+    el('option', { value: 'dingtalk' }, '钉钉自定义机器人'),
+  );
+  typeSel.value = d.type || 'wecom';
+
+  const urlIn = el('input', {
+    value: d.url || '', disabled: !canEdit,
+    placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…',
+  });
+  const secretIn = el('input', {
+    type: 'password', autocomplete: 'new-password', disabled: !canEdit,
+    placeholder: d.secretMasked ? `当前 ${d.secretMasked}（留空 = 保持不变）` : '机器人开了「加签」才需要填',
+  });
+  const onUploadCb = el('input', { type: 'checkbox', disabled: !canEdit });
+  onUploadCb.checked = d.onUpload !== false;
+  const onCommentCb = el('input', { type: 'checkbox', disabled: !canEdit });
+  onCommentCb.checked = d.onComment !== false;
+  const enabledCb = el('input', { type: 'checkbox', disabled: !canEdit });
+  enabledCb.checked = d.enabled !== false;
+
+  const testChip = el('span', { class: 'pill' }, '未测试');
+  const runTest = async () => {
+    testChip.textContent = '发送中…';
+    testChip.className = 'pill';
+    try {
+      const st = await api('/settings/notify/test');
+      if (st.ok) { testChip.className = 'pill done'; testChip.textContent = '已发出，去群里看一眼'; }
+      else { testChip.className = 'pill high'; testChip.textContent = st.error || '发送失败'; }
+    } catch (e) {
+      testChip.className = 'pill high';
+      testChip.textContent = e.message;
+    }
+  };
+
+  const save = async () => {
+    const body = {
+      notify_type: typeSel.value,
+      notify_url: urlIn.value.trim(),
+      notify_enabled: !!enabledCb.checked,
+      notify_on_upload: !!onUploadCb.checked,
+      notify_on_comment: !!onCommentCb.checked,
+    };
+    if (secretIn.value.trim()) body.notify_secret = secretIn.value.trim();
+    try {
+      await api('/settings/notify', { method: 'PUT', body });
+      toast('已保存，立即生效（无需重启容器）');
+      loadSettings();
+    } catch (e) { toast(e.message, 'err'); }
+  };
+
+  const clearSecret = async () => {
+    if (!await confirmDialog({
+      title: '清除加签密钥',
+      message: '清除后本系统将不再对 webhook 请求加签（不会回退到环境变量）。机器人安全设置开了「加签」时会推送失败。',
+      confirmText: '清除', danger: true,
+    })) return;
+    try {
+      await api('/settings/notify', { method: 'PUT', body: { notify_secret: null } });
+      toast('已清除加签密钥');
+      loadSettings();
+    } catch (e) { toast(e.message, 'err'); }
+  };
+
+  const form = el('div', { class: 'setform' },
+    el('div', { class: 'setstat' },
+      el('span', { class: 'mini-lbl' }, '推送状态'),
+      enabledCb.checked ? el('span', { class: 'pill done' }, '已启用') : el('span', { class: 'pill high' }, '未启用'),
+      el('button', { class: 'btn btn-ghost sm', onclick: runTest }, '⚡ 发送测试'),
+      el('span', { style: { flex: 1 } }),
+      testChip,
+    ),
+    el('div', { class: 'field-row' },
+      el('div', { class: 'field' },
+        el('label', {}, '机器人类型', srcDot('notify_type')),
+        typeSel),
+      el('div', { class: 'field' },
+        el('label', {}, 'Webhook 地址', srcDot('notify_url')),
+        urlIn),
+    ),
+    el('div', { class: 'field' },
+      el('label', {}, '加签密钥（可选）', srcDot('notify_secret')),
+      el('div', { class: 'pw-wrap' }, secretIn),
+      el('p', { class: 'sethint' }, '钉钉 / 飞书机器人安全设置选了「加签」时才需要；企业微信机器人不用填。'),
+    ),
+    el('div', { class: 'field-row' },
+      el('label', { class: 'setcheck' },
+        onUploadCb,
+        el('span', {}, '素材入库时推送'),
+        el('em', {}, '上传 / NAS 投递目录有新素材，群里收到入库通知'),
+      ),
+      el('label', { class: 'setcheck' },
+        onCommentCb,
+        el('span', {}, '新评论时推送'),
+        el('em', {}, '评论里 @成员，群里会真实艾特到 TA'),
+      ),
+    ),
+    el('label', { class: 'setcheck' },
+      enabledCb,
+      el('span', {}, '启用群通知'),
+      el('em', {}, '关闭后所有事件都不再推送'),
+    ),
+    el('div', { class: 'sacts' },
+      canEdit ? el('button', { class: 'btn btn-primary', onclick: save }, '保存设置') : null,
+      canEdit && d.secretMasked ? el('button', { class: 'btn btn-ghost', onclick: clearSecret }, '清除密钥') : null,
+    ),
+    !canEdit ? el('p', { class: 'sethint' }, '当前账号不是管理员，这里只读。') : null,
+    el('p', { class: 'sethint' },
+      '要在群里被真实艾特，还需要到「成员」页给成员配「通知账号」（企业微信 userid / 钉钉手机号 / 飞书 user_id）；没配的成员只会以文字形式出现在消息里。环境变量 NOTIFY_* 是出厂默认，这里保存过的项优先生效。'),
+  );
+
+  return panel('群通知', '企业微信 / 飞书 / 钉钉 · 素材入库与新评论推送', form);
 }
 
 /* ========================= 脚本库（AI 拆解） ========================= */
@@ -1878,8 +2006,17 @@ function renderMembers() {
         el('div', { class: 'mem-name' }, u.name, u.id === S.user.id
           ? el('span', { style: { fontSize: '10px', color: 'var(--cy)', marginLeft: '6px' } }, '我')
           : null),
-        el('div', { class: 'mem-role' }, { admin: '管理员', ops: '运营', shooter: '拍摄', viewer: '只读' }[u.role] || u.role),
+        el('div', { class: 'mem-role' },
+          { admin: '管理员', ops: '运营', shooter: '拍摄', viewer: '只读' }[u.role] || u.role,
+          u.notify_key ? el('span', { class: 'mem-at', title: `通知账号 ${u.notify_key}` }, '可@') : null),
       ),
+      S.user.role === 'admin'
+        ? el('button', {
+            class: 'icon-btn',
+            title: u.notify_key ? `通知账号：${u.notify_key}（点击修改）` : '配置通知账号（群里真实艾特用）',
+            onclick: () => openNotifyKeyModal(u),
+          }, '@')
+        : null,
       canManage
         ? el('button', {
             class: 'icon-btn',
@@ -1898,6 +2035,48 @@ function renderMembers() {
   view.append(el('div', { style: { marginTop: '18px' } },
     el('button', { class: 'btn', onclick: openJoinModal }, '＋ 添加成员'),
   ));
+}
+
+/* ---- 管理员配成员通知账号（群机器人真实艾特用的标识） ---- */
+async function openNotifyKeyModal(u) {
+  let cfg = null;
+  try { cfg = await api('/settings/notify'); } catch { /* 通知未配置也能先填 */ }
+  const hintText = {
+    wecom: '填该成员在企业微信的 userid（企业微信管理后台 → 通讯录可查），群机器人艾特按 userid 匹配。',
+    feishu: '填该成员的飞书 user_id / open_id（飞书管理后台或开放平台可查），机器人艾特按它匹配。',
+    dingtalk: '填该成员的钉钉手机号（企业通讯录里的手机号），群里艾特按手机号匹配。',
+  }[cfg?.type || 'wecom'];
+  const input = el('input', {
+    type: 'text', value: u.notify_key || '', maxlength: 64,
+    placeholder: cfg?.type === 'dingtalk' ? '13xxxxxxxxx' : '如 zhangsan',
+  });
+  openModal({
+    title: `通知账号 · ${u.name}`,
+    body: el('div', { class: 'modal-body' },
+      el('div', { class: 'field' },
+        el('label', {}, '通知账号（群里真实艾特用的标识）'),
+        input,
+        el('p', { style: { fontSize: '10.5px', color: 'var(--tx3)', lineHeight: 1.6, marginTop: '6px' } },
+          cfg?.url ? hintText : '群通知还没配置 webhook，可以先填上；到「系统 → 系统设置 → 群通知」配置后生效。'),
+      ),
+    ),
+    footer: [
+      el('button', { class: 'btn btn-ghost', onclick: () => closeModal() }, '取消'),
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: async () => {
+          try {
+            await api('/users/' + u.id, { method: 'PATCH', body: { notify_key: input.value.trim() } });
+            closeModal();
+            toast(input.value.trim() ? '通知账号已保存' : '已清空通知账号');
+            u.notify_key = input.value.trim() || null;
+            loadMembers();
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, '保存'),
+    ],
+  });
+  setTimeout(() => input.focus(), 60);
 }
 
 /* ---- 管理员添加成员 ---- */
@@ -2064,6 +2243,63 @@ async function doDownload(ids, note = '') {
 }
 
 /* ========================= 抽屉：播放 + 详情 + 评论 ========================= */
+
+/* ---- 评论 @ 成员：插入 + 下拉选人（群里推送时真实艾特） ---- */
+let atMenuRef = null;   // { el, btn }：当前打开的选人菜单
+function closeAtMenu() {
+  if (!atMenuRef) return;
+  atMenuRef.el.remove();
+  atMenuRef = null;
+}
+document.addEventListener('click', e => {
+  if (atMenuRef && !atMenuRef.el.contains(e.target) && !atMenuRef.btn.contains(e.target)) closeAtMenu();
+}, true);
+
+function insertAtCursor(input, name) {
+  const pos = input.selectionStart ?? input.value.length;
+  const before = input.value.slice(0, pos);
+  const after = input.value.slice(input.selectionEnd ?? pos);
+  const pad = before && !/\s$/.test(before) ? ' ' : '';
+  const text = `${pad}@${name} `;
+  input.value = before + text + after;
+  const np = (before + text).length;
+  input.focus();
+  input.setSelectionRange(np, np);
+}
+
+async function toggleAtMenu(input, btn, anchor) {
+  if (atMenuRef) { closeAtMenu(); return; }
+  let members = S.members || [];
+  if (!members.length) {
+    try { members = (await api('/users')).items || []; S.members = members; }
+    catch (e) { toast(e.message, 'err'); return; }
+  }
+  const list = members.filter(u => u.id !== S.user.id);
+  if (!list.length) return;
+  const menu = el('div', { class: 'at-menu' },
+    ...list.map(u => el('button', {
+      type: 'button',
+      title: u.notify_key ? '已配通知账号：群里能真实艾特到' : '未配通知账号：只会以文字出现',
+      onclick: ev => { ev.preventDefault(); ev.stopPropagation(); insertAtCursor(input, u.name); closeAtMenu(); },
+    },
+      avatarMini(u.name, u.color),
+      el('span', { class: 'n' }, u.name),
+      u.notify_key ? el('i', { class: 'at-ok' }, '@') : el('i', { class: 'at-no' }, '未配'),
+    )));
+  anchor.append(menu);
+  atMenuRef = { el: menu, btn };
+}
+
+/** 评论正文里的 @名字 高亮（不拼 HTML，逐段建节点） */
+function cmtBodyNodes(body) {
+  return String(body || '')
+    .split(/(@[^\s，。,.!?！？、；;:：]{1,24})/g)
+    .filter(Boolean)
+    .map(part => part.startsWith('@') && part.length > 1
+      ? el('span', { class: 'at-hl' }, part)
+      : part);
+}
+
 async function openVideo(id) {
   const root = document.getElementById('drawer');
   root.hidden = false;
@@ -2367,7 +2603,7 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
                 }, '删除')
               : null,
           ),
-          el('div', { class: 'cmt-text' }, c.body),
+          el('div', { class: 'cmt-text' }, ...cmtBodyNodes(c.body)),
         ),
       ));
     }
@@ -2440,7 +2676,7 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
   scroll.append(cmtSec);
 
   // ---- 评论输入 ----
-  const input = el('textarea', { placeholder: '评论这条素材…（回车发送，Shift+回车换行）' });
+  const input = el('textarea', { placeholder: '评论这条素材…（回车发送，Shift+回车换行；@ 可艾特成员）' });
   const send = async () => {
     const body = input.value.trim();
     if (!body) return;
@@ -2454,9 +2690,17 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
   };
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    // @ 后面紧跟的名字按 esc 关闭菜单
+    if (e.key === 'Escape') closeAtMenu();
   });
 
   const form = el('div', { class: 'cmt-form' },
+    el('button', {
+      class: 'btn btn-ghost sm at-btn',
+      type: 'button',
+      title: '艾特成员（配了通知账号的成员会在群里被真实艾特）',
+      onclick: e => { e.preventDefault(); e.stopPropagation(); toggleAtMenu(input, e.currentTarget, form); },
+    }, '@'),
     input,
     el('button', { class: 'btn btn-primary', onclick: send }, '发送'),
   );

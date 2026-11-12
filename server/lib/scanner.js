@@ -4,6 +4,7 @@ const path = require('path');
 const db = require('../db');
 const config = require('../config');
 const media = require('./media');
+const notify = require('./notify');
 const { ingest } = require('./store');
 const { ymd } = require('./util');
 
@@ -69,6 +70,7 @@ async function scanNow({ reason = 'manual', uploaderId = null } = {}) {
     }
     const files = await walk(config.scanDir);
     result.scanned = files.length;
+    const addedVideos = [];
 
     for (const file of files) {
       try {
@@ -91,12 +93,19 @@ async function scanNow({ reason = 'manual', uploaderId = null } = {}) {
         });
         putScanFile.run(file, stat.size, Math.floor(stat.mtimeMs), video.id, Date.now());
         if (duplicate) result.duplicate++;
-        else result.added++;
+        else { result.added++; addedVideos.push(video); }
       } catch (e) {
         result.failed++;
         if (result.errors.length < 20) result.errors.push(`${path.basename(file)}: ${e.message}`);
         console.warn('[scan] 入库失败:', file, e.message);
       }
+    }
+    // 群通知：投递目录有新素材入库（定时扫描没有触发人，显示为「投递目录扫描」）
+    if (addedVideos.length) {
+      const trigger = uploaderId
+        ? db.prepare('SELECT name FROM users WHERE id = ?').get(uploaderId)
+        : null;
+      notify.onUpload(addedVideos, trigger);
     }
     state.lastResult = result;
     state.lastError = null;

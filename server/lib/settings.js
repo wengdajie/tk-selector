@@ -45,4 +45,31 @@ function aiOverlay() {
   };
 }
 
-module.exports = { get: raw, set, getAi, aiOverlay };
+/** 群通知的有效配置（同 AI：每次现读，改完不用重启） */
+const NOTIFY_TYPES = ['wecom', 'feishu', 'dingtalk'];
+function getNotify() {
+  const t = raw('notify_type');
+  return {
+    enabled: (raw('notify_enabled') ?? (config.notify.enabled ? '1' : '0')) !== '0',
+    type: NOTIFY_TYPES.includes(t) ? t : config.notify.type,
+    url: (raw('notify_url') ?? (config.notify.url || '')).trim(),
+    // 密钥同 Key 的语义：null=未设置（回退 env），''=明确不加签
+    secret: raw('notify_secret') ?? config.notify.secret,
+    onUpload: (raw('notify_on_upload') ?? (config.notify.onUpload ? '1' : '0')) !== '0',
+    onComment: (raw('notify_on_comment') ?? (config.notify.onComment ? '1' : '0')) !== '0',
+  };
+}
+
+/** 通知设置项列表（值未写 DB 的项返回 null） */
+function notifyOverlay() {
+  return {
+    notify_enabled: raw('notify_enabled'),
+    notify_type: raw('notify_type'),
+    notify_url: raw('notify_url'),
+    notify_secret: raw('notify_secret'),
+    notify_on_upload: raw('notify_on_upload'),
+    notify_on_comment: raw('notify_on_comment'),
+  };
+}
+
+module.exports = { get: raw, set, getAi, aiOverlay, getNotify, notifyOverlay };

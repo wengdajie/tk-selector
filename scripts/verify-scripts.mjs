@@ -157,7 +157,8 @@ const spawnServer = () => {
   s.stderr.on('data', d => { log += d; });
   return s;
 };
-const stop = () => { try { srv?.kill(); } catch { /* ignore */ } mock.close(); };
+const stop = () => { try { srv?.kill(); } catch { /* ignore */ } mock.close(); extraClosers.forEach(fn => { try { fn(); } catch { /* ignore */ } }); };
+const extraClosers = [];   // 通知 webhook 收集器等，结束时一并关掉
 
 const waitReady = async (cycles = 80) => {
   for (let i = 0; i < cycles; i++) {
@@ -442,6 +443,141 @@ ok(delV.status === 200, '删除素材');
 const left = await call('/scripts?videoId=' + vid, { uid });
 ok(left.data.items?.length === 0, '素材删除后脚本级联清空');
 ok(!fs.existsSync(path.join(frameRoot, 's-' + sid3)), '级联清理关键帧目录');
+
+// ---- v1.7.0：群通知（企业微信 / 飞书 / 钉钉 webhook） ----
+console.log('\n== v1.7.0 群通知 ==');
+const hooks = [];
+const hookSrv = http.createServer((req, res) => {
+  let buf = '';
+  req.on('data', c => { buf += c; });
+  req.on('end', () => {
+    let body = {};
+    try { body = JSON.parse(buf || '{}'); } catch { /* ignore */ }
+    hooks.push({ url: req.url, body });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"errcode":0}');
+  });
+});
+await new Promise(r => hookSrv.listen(0, '127.0.0.1', r));
+extraClosers.push(() => hookSrv.close());
+const hookPort = hookSrv.address().port;
+const hookUrl = `http://127.0.0.1:${hookPort}/hook`;
+
+// 读取 / 权限 / 校验
+const nRead0 = await call('/settings/notify', { uid });
+ok(nRead0.status === 200 && nRead0.data.canEdit === true, '管理员可读通知设置');
+ok(nRead0.data.url === '' && nRead0.data.secretMasked === '', '出厂默认：未配 webhook');
+const nTest0 = await call('/settings/notify/test', { uid });
+ok(nTest0.data.ok === false && /未配置/.test(nTest0.data.error || ''), '未配地址时测试给出明确提示', JSON.stringify(nTest0.data));
+const nOp = await call('/settings/notify', { method: 'PUT', uid: opUid, body: { notify_type: 'wecom' } });
+ok(nOp.status === 403, '普通成员改通知设置被拒', String(nOp.status));
+const nBad = await call('/settings/notify', { method: 'PUT', uid, body: { notify_type: 'slack' } });
+ok(nBad.status === 400, '不支持的机器人类型被拒', JSON.stringify(nBad.data));
+const nBadUrl = await call('/settings/notify', { method: 'PUT', uid, body: { notify_url: 'ftp://x' } });
+ok(nBadUrl.status === 400, '非 http 地址被拒');
+
+// 配置企业微信机器人
+const nSet = await call('/settings/notify', {
+  method: 'PUT', uid,
+  body: { notify_type: 'wecom', notify_url: hookUrl, notify_enabled: true, notify_on_upload: true, notify_on_comment: true },
+});
+ok(nSet.status === 200 && nSet.data.type === 'wecom' && nSet.data.url === hookUrl, '保存 webhook 配置');
+ok(nSet.data.sources?.notify_url === 'db', '通知项标记为管理员设置值');
+
+const nTest1 = await call('/settings/notify/test', { uid });
+ok(nTest1.data.ok === true, '测试消息发送成功', JSON.stringify(nTest1.data));
+await sleep(400);
+ok(hooks.length === 1 && hooks[0].body.msgtype === 'markdown', '测试消息是企业微信 markdown 格式', JSON.stringify(hooks[0]?.body));
+ok(String(hooks[0]?.body?.markdown?.content || '').includes('通知测试'), '测试消息内容正确');
+
+// 上传素材 → 入库推送（换个内容避免和之前素材命中去重）
+const sample2 = path.join(tmp, 'sample-notify.mp4');
+execFileSync('ffmpeg', [
+  '-hide_banner', '-loglevel', 'error', '-y',
+  '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=25',
+  '-f', 'lavfi', '-i', 'sine=frequency=660',
+  '-t', '11', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast',
+  '-c:a', 'aac', '-shortest', sample2,
+]);
+const nfd = new FormData();
+nfd.append('files', new Blob([fs.readFileSync(sample2)], { type: 'video/mp4' }), 'notify.mp4');
+nfd.append('space', 'library');
+nfd.append('title', '通知验证素材');
+const nUp = await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: nfd });
+const nUpData = await nUp.json().catch(() => ({}));
+const nid = nUpData.items?.[0]?.id;
+ok(nUp.status === 201 && !!nid, '上传一条新素材', String(nUp.status));
+await sleep(600);
+ok(hooks.length === 2, '入库后推送了一条通知', String(hooks.length));
+ok(String(hooks[1]?.body?.markdown?.content || '').includes('素材入库'), '入库通知内容正确');
+ok(String(hooks[1]?.body?.markdown?.content || '').includes('通知验证素材'), '入库通知带素材标题');
+ok(String(hooks[1]?.body?.markdown?.content || '').includes('管理员'), '入库通知带上传人');
+
+// 同文件重传（去重）→ 不推送
+const dfd2 = new FormData();
+dfd2.append('files', new Blob([fs.readFileSync(sample2)], { type: 'video/mp4' }), 'notify.mp4');
+dfd2.append('space', 'library');
+const nUp2 = await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: dfd2 });
+await nUp2.json().catch(() => ({}));
+await sleep(600);
+ok(hooks.length === 2, '去重的重复上传不推送', String(hooks.length));
+
+// 给「设置验证-运营」配通知账号，评论 @TA → 真实艾特
+const nKeyPut = await call('/users/' + opUid, { method: 'PATCH', uid, body: { notify_key: 'wecom-lin' } });
+ok(nKeyPut.status === 200 && nKeyPut.data.user?.notify_key === 'wecom-lin', '管理员可配成员通知账号', JSON.stringify(nKeyPut.data.user?.notify_key));
+const cmt1 = await call(`/videos/${nid}/comments`, {
+  method: 'POST', uid,
+  body: { body: '开场不错，@设置验证-运营 你看下节奏' },
+});
+ok(cmt1.status === 201, '发一条带 @ 的评论');
+await sleep(600);
+ok(hooks.length === 3, '评论后推送通知', String(hooks.length));
+const cmt1Text = String(hooks[2]?.body?.markdown?.content || '');
+ok(cmt1Text.includes('新评论') && cmt1Text.includes('开场不错'), '评论通知带正文');
+ok(cmt1Text.includes('<@wecom-lin>'), '评论里的 @ 转成了企业微信艾特语法', cmt1Text.slice(-80));
+
+// 无 @ 的评论 → 没有艾特后缀
+await call(`/videos/${nid}/comments`, { method: 'POST', uid, body: { body: '好的收到' } });
+await sleep(600);
+ok(hooks.length === 4, '普通评论也推送');
+ok(!String(hooks[3]?.body?.markdown?.content || '').includes('<@'), '无提及时不带艾特语法');
+
+// 切飞书（带加签）
+await call('/settings/notify', { method: 'PUT', uid, body: { notify_type: 'feishu', notify_secret: 'fei-secret' } });
+await call(`/videos/${nid}/comments`, { method: 'POST', uid, body: { body: '@设置验证-运营 再看一眼结尾' } });
+await sleep(600);
+ok(hooks.length === 5, '飞书格式推送成功');
+const fei = hooks[4]?.body || {};
+ok(fei.msg_type === 'text' && typeof fei.content?.text === 'string', '飞书是 text 消息', JSON.stringify(fei).slice(0, 120));
+ok(!!fei.timestamp && !!fei.sign, '飞书带加签字段（timestamp/sign）');
+ok(String(fei.content?.text || '').includes('<at user_id="wecom-lin"></at>'), '飞书艾特语法正确');
+
+// 切钉钉（带加签 + 手机号艾特）
+await call('/settings/notify', { method: 'PUT', uid, body: { notify_type: 'dingtalk' } });
+await call('/users/' + opUid, { method: 'PATCH', uid, body: { notify_key: '13800138000' } });
+await call(`/videos/${nid}/comments`, { method: 'POST', uid, body: { body: '@设置验证-运营 看完了吗' } });
+await sleep(600);
+ok(hooks.length === 6, '钉钉格式推送成功');
+const ding = hooks[5]?.body || {};
+ok(ding.msgtype === 'markdown' && Array.isArray(ding.at?.atMobiles), '钉钉是 markdown + atMobiles', JSON.stringify(ding).slice(0, 120));
+ok((ding.at?.atMobiles || []).includes('13800138000'), '钉钉按手机号艾特');
+ok(String(ding.markdown?.text || '').includes('@13800138000'), '钉钉正文含手机号艾特');
+ok(String(hooks[5]?.url || '').includes('timestamp=') && String(hooks[5]?.url || '').includes('sign='), '钉钉加签拼在 URL 上', hooks[5]?.url);
+
+// 关掉评论事件 → 不再推送
+await call('/settings/notify', { method: 'PUT', uid, body: { notify_on_comment: false } });
+await call(`/videos/${nid}/comments`, { method: 'POST', uid, body: { body: '这条不该推送' } });
+await sleep(900);
+ok(hooks.length === 6, '关闭评论事件后不再推送', String(hooks.length));
+// 关总开关 → 上传也不推
+await call('/settings/notify', { method: 'PUT', uid, body: { notify_enabled: false } });
+const nfd3 = new FormData();
+nfd3.append('files', new Blob([fs.readFileSync(sample)], { type: 'video/mp4' }), 'notify2.mp4');
+nfd3.append('space', 'library');
+nfd3.append('title', '关开关后上传');
+await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: nfd3 });
+await sleep(900);
+ok(hooks.length === 6, '关闭总开关后上传不推送', String(hooks.length));
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 if (fail) console.log('\n服务端日志片段：\n' + log.slice(-1500));

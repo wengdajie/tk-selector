@@ -45,4 +45,14 @@ module.exports = {
     frames: Math.min(10, Math.max(3, Number(process.env.AI_FRAMES || 6))),
     timeoutMs: Number(process.env.AI_TIMEOUT_MS || 120000),
   },
+
+  // ---- 群通知（企业微信 / 飞书 / 钉钉 群机器人 webhook）----
+  notify: {
+    enabled: String(process.env.NOTIFY_ENABLED || '1') !== '0',
+    type: ['wecom', 'feishu', 'dingtalk'].includes(process.env.NOTIFY_TYPE) ? process.env.NOTIFY_TYPE : 'wecom',
+    url: (process.env.NOTIFY_URL || '').trim(),
+    secret: process.env.NOTIFY_SECRET || '',
+    onUpload: String(process.env.NOTIFY_ON_UPLOAD ?? '1') !== '0',
+    onComment: String(process.env.NOTIFY_ON_COMMENT ?? '1') !== '0',
+  },
 };
