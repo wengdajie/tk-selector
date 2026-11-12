@@ -20,6 +20,7 @@ function shape(row) {
   return {
     ...row,
     segments: parse(row.segments, []),
+    shot_setup: parse(row.shot_setup, {}),
     frames: parse(row.frames, []),
     tagList: String(row.tags || '').split(',').filter(Boolean),
   };

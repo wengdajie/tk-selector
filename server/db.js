@@ -109,7 +109,9 @@ CREATE TABLE IF NOT EXISTS scripts (
   title       TEXT NOT NULL DEFAULT '',
   summary     TEXT NOT NULL DEFAULT '',
   hook        TEXT NOT NULL DEFAULT '',
-  segments    TEXT NOT NULL DEFAULT '',          -- JSON [{t,shot,line}]
+  segments    TEXT NOT NULL DEFAULT '',          -- JSON [{t,shot,action,line,text,audio,props,cut}]
+  shot_setup  TEXT NOT NULL DEFAULT '',          -- JSON {scene,cast,props,light,gear,pace}
+  replicate_prompt TEXT NOT NULL DEFAULT '',     -- 可直接喂给 AI 视频工具的复刻提示词
   script_text TEXT NOT NULL DEFAULT '',          -- 完整口播稿
   cta         TEXT NOT NULL DEFAULT '',
   tags        TEXT NOT NULL DEFAULT '',
@@ -150,6 +152,9 @@ const migrations = [
   ['videos', 'stage', "ALTER TABLE videos ADD COLUMN stage TEXT NOT NULL DEFAULT 'new'"],
   ['videos', 'scores', "ALTER TABLE videos ADD COLUMN scores TEXT NOT NULL DEFAULT ''"],
   ['videos', 'score_content', 'ALTER TABLE videos ADD COLUMN score_content INTEGER'],
+  // ---- v1.5.1：脚本补充动作 / 拍摄设定 / AI 复刻提示词 ----
+  ['scripts', 'shot_setup', "ALTER TABLE scripts ADD COLUMN shot_setup TEXT NOT NULL DEFAULT ''"],
+  ['scripts', 'replicate_prompt', "ALTER TABLE scripts ADD COLUMN replicate_prompt TEXT NOT NULL DEFAULT ''"],
 ];
 for (const [table, col, sql] of migrations) {
   if (!hasColumn(table, col)) {

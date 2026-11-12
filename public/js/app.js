@@ -1075,6 +1075,7 @@ function renderScripts() {
 
 function scriptCard(s) {
   const frames = s.frames || [];
+  const segN = (s.segments || []).length;
   return el('article', {
     class: `scard st-${s.status}`,
     onclick: () => openScript(s.id),
@@ -1086,7 +1087,9 @@ function scriptCard(s) {
       el('div', { class: 'scard-grad' }),
       el('div', { class: 'scard-top' }, scriptBadge(s.status)),
       frames.length > 1
-        ? el('div', { class: 'scard-frames' }, el('b', {}, String(frames.length)), ' 帧')
+        ? el('div', { class: 'scard-frames' },
+            el('b', {}, String(frames.length)), ' 帧',
+            segN ? ` · ${segN} 段` : '')
         : null,
     ),
     el('div', { class: 'scard-body' },
@@ -1141,24 +1144,48 @@ async function copyText(text) {
   } catch { return false; }
 }
 
+/** 整份脚本的纯文本（复制 / 导出共用），含拍摄设定、动作、复刻提示词 */
+function scriptPlainText(s) {
+  const setup = s.shot_setup || {};
+  const segs = s.segments || [];
+  const out = [];
+  out.push(s.title || '未命名脚本', '');
+  if (s.summary) out.push(`一句话：${s.summary}`);
+  if (s.hook) out.push(`钩子：${s.hook}`);
+  if ((s.tagList || []).length) out.push(`标签：${s.tagList.join(' / ')}`);
+  if (s.video_title) out.push(`来源素材：${s.video_title}`);
+  out.push('');
+
+  const setupLines = [
+    ['scene', '场景'], ['cast', '人物'], ['props', '道具'],
+    ['light', '光线'], ['gear', '机位'], ['pace', '节奏'],
+  ].filter(([k]) => setup[k]).map(([k, label]) => `${label}：${setup[k]}`);
+  if (setupLines.length) out.push('【拍摄设定】', ...setupLines, '');
+
+  if (segs.length) {
+    out.push('【分镜】');
+    segs.forEach((g, i) => {
+      out.push(`${i + 1}. ${g.t || ''}`.trim());
+      if (g.shot) out.push(`   画面：${g.shot}`);
+      if (g.action) out.push(`   动作：${g.action}`);
+      if (g.line) out.push(`   台词：${g.line}`);
+      if (g.text) out.push(`   字幕：${g.text}`);
+      if (g.audio) out.push(`   声音：${g.audio}`);
+      if (g.props) out.push(`   道具：${g.props}`);
+      if (g.cut) out.push(`   衔接：${g.cut}`);
+    });
+    out.push('');
+  }
+
+  if (s.script_text) out.push('【口播稿】', s.script_text, '');
+  if (s.cta) out.push(`【收口】${s.cta}`, '');
+  if (s.replicate_prompt) out.push('【AI 复刻提示词】', s.replicate_prompt);
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function downloadScript(s) {
   const name = String(s.title || '脚本').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
-  const lines = [
-    s.title || '未命名脚本',
-    '',
-    s.summary ? `一句话：${s.summary}` : '',
-    s.hook ? `钩子：${s.hook}` : '',
-    (s.tagList || []).length ? `标签：${s.tagList.join(' / ')}` : '',
-    '',
-    '【分镜】',
-    ...(s.segments || []).map((g, i) => `${i + 1}. ${g.t}\n   画面：${g.shot}\n   台词：${g.line}`),
-    '',
-    '【口播稿】',
-    s.script_text || '',
-    '',
-    s.cta ? `【收口】${s.cta}` : '',
-  ].filter(x => x !== '').join('\n');
-  const url = URL.createObjectURL(new Blob([lines], { type: 'text/plain;charset=utf-8' }));
+  const url = URL.createObjectURL(new Blob([scriptPlainText(s)], { type: 'text/plain;charset=utf-8' }));
   const a = el('a', { href: url, download: `${name}.txt` });
   document.body.append(a);
   a.click();
@@ -1196,6 +1223,34 @@ function scriptDetail(s, actions) {
 
   const segs = s.segments || [];
   const text = s.script_text || '';
+  const setup = s.shot_setup || {};
+  const SETUP_FIELDS = [
+    ['scene', '场景'], ['cast', '人物'], ['props', '道具'],
+    ['light', '光线'], ['gear', '机位'], ['pace', '节奏'],
+  ];
+  const SEG_FIELDS = [
+    ['shot', '画面'], ['action', '动作'], ['line', '台词'],
+    ['text', '字幕'], ['audio', '声音'], ['props', '道具'],
+  ];
+  const setupRows = SETUP_FIELDS.filter(([k]) => setup[k]);
+
+  const segCard = (g, i) => {
+    const rows = SEG_FIELDS.filter(([k]) => g[k]);
+    return el('div', { class: 'segcard' },
+      el('div', { class: 'segcard-top' },
+        el('span', { class: 'st' }, g.t || `第 ${i + 1} 段`),
+        g.cut ? el('span', { class: 'scut' }, `→ ${g.cut}`) : null,
+      ),
+      el('div', { class: 'segcard-body' },
+        ...(rows.length
+          ? rows.map(([k, label]) => el('div', { class: `srow f-${k}` },
+              el('span', { class: 'k' }, label),
+              el('span', { class: 'v' }, g[k])))
+          : [el('div', { class: 'srow' },
+              el('span', { class: 'v dim' }, '这一段模型没给细节，可以重新拆解一次'))]),
+      ),
+    );
+  };
 
   return [
     el('div', { class: 'shead' },
@@ -1212,19 +1267,19 @@ function scriptDetail(s, actions) {
           el('span', { class: 'mini-lbl' }, '前 3 秒钩子'),
           el('p', {}, s.hook))
       : null,
+    setupRows.length
+      ? el('div', { class: 'setupgrid' },
+          ...setupRows.map(([k, label]) => el('div', { class: 'setupitem' },
+            el('span', { class: 'k' }, label),
+            el('p', {}, setup[k]))))
+      : null,
     frameStrip(s),
     segs.length
-      ? el('div', { class: 'segwrap' },
-          el('div', { class: 'seghead' },
-            el('span', {}, '时间'),
-            el('span', {}, '画面 / 拍法'),
-            el('span', {}, '台词 / 字幕'),
-          ),
-          ...segs.map(g => el('div', { class: 'segrow' },
-            el('span', { class: 'st' }, g.t),
-            el('span', { class: 'ss' }, g.shot || '—'),
-            el('span', { class: 'sl' }, g.line || '—'),
-          )),
+      ? el('div', { class: 'seglist' },
+          el('div', { class: 'seglbl' },
+            el('span', { class: 'mini-lbl' }, `分镜 ${segs.length} 段`),
+            el('span', { class: 'snote' }, '照着「动作」这一列就能复现同款镜头')),
+          ...segs.map(segCard),
         )
       : el('p', { class: 'snote' }, '模型没有给出分镜，可以重新拆解一次试试。'),
     text
@@ -1239,7 +1294,6 @@ function scriptDetail(s, actions) {
                 toast(ok ? '已复制口播稿' : '复制失败，请手动选中', ok ? 'ok' : 'err');
               },
             }, '复制'),
-            el('button', { class: 'btn btn-ghost sm', onclick: () => downloadScript(s) }, '↓ .txt'),
           ),
           el('pre', {}, text),
         )
@@ -1249,15 +1303,29 @@ function scriptDetail(s, actions) {
           el('span', { class: 'mini-lbl' }, '收口 / CTA'),
           el('p', {}, s.cta))
       : null,
+    s.replicate_prompt
+      ? el('div', { class: 'sprompt' },
+          el('div', { class: 'sprompt-head' },
+            el('span', { class: 'mini-lbl' }, 'AI 复刻提示词'),
+            el('span', { class: 'sp-tip' }, '可粘给 Sora / 可灵 / 即梦'),
+            el('span', { style: { flex: 1 } }),
+            el('button', {
+              class: 'btn btn-ghost sm',
+              onclick: async () => {
+                const ok = await copyText(s.replicate_prompt);
+                toast(ok ? '已复制复刻提示词' : '复制失败，请手动选中', ok ? 'ok' : 'err');
+              },
+            }, '复制'),
+          ),
+          el('pre', {}, s.replicate_prompt),
+        )
+      : null,
     el('div', { class: 'sacts' },
       el('button', { class: 'btn btn-primary', onclick: async () => {
-        const ok = await copyText([
-          s.title || '',
-          text,
-          segs.length ? '\n【分镜】\n' + segs.map((g, i) => `${i + 1}. ${g.t} ${g.shot}`).join('\n') : '',
-        ].filter(Boolean).join('\n'));
+        const ok = await copyText(scriptPlainText(s));
         toast(ok ? '已复制整份脚本' : '复制失败，请用 .txt 导出', ok ? 'ok' : 'err');
       } }, '复制整份'),
+      el('button', { class: 'btn btn-ghost', onclick: () => downloadScript(s) }, '↓ 导出 .txt'),
       el('button', { class: 'btn btn-ghost', onclick: () => { closeModal(); openVideo(s.video_id); } }, '看原素材'),
       el('button', { class: 'btn btn-ghost', onclick: actions.retry }, '↻ 重新拆解'),
       actions.delBtn,

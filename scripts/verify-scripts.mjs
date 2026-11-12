@@ -28,15 +28,69 @@ const MOCK = {
   summary: '用乱糟糟的抽屉开场制造痛点，再用对比演示收纳效果带出货。',
   hook: '前三秒是拉不开的抽屉特写，直接命中“家里乱”的痛点。',
   tags: ['痛点开场', '对比实验', '口播带货', '特写细节'],
+  setup: {
+    scene: '出租屋卧室的抽屉柜前，背景是铺灰色床单的床和半开的衣柜',
+    cast: '一名 25 岁左右女性，灰色家居服，披发，无明显妆容',
+    props: '透明分格收纳盒 ×2、袜子内衣充电线若干、木质抽屉',
+    light: '左侧窗户自然光，色温偏冷，暗部有轻微噪点',
+    gear: '手机竖屏 9:16，俯拍支架加手持跟随，以特写为主',
+    pace: '平均 3 秒一个镜头，重音落在抽屉合上的声音，硬切为主',
+  },
   segments: [
-    { t: '0:00-0:02', shot: '俯拍特写，手用力拽一个塞满杂物的抽屉，抽屉卡住', line: '你家抽屉是不是也这样？' },
-    { t: '0:02-0:05', shot: '中景，桌面上散落的杂物被推到一起', line: '东西一多，找什么都找不到。' },
-    { t: '0:05-0:09', shot: '手持跟拍，把杂物按格子放进收纳盒', line: '按格子分好，一眼就能看到。' },
-    { t: '0:09-0:13', shot: '特写，抽屉一推到底顺滑合上', line: '推回去，一点不卡。' },
-    { t: '0:13-0:16', shot: '正面半身口播，手指收纳盒', line: '链接放下面，颜色自己挑。' },
+    {
+      t: '0:00-0:03',
+      shot: '俯拍特写，镜头缓慢下压',
+      action: '右手抓住抽屉把手，用力拽两次没拉开，肩膀跟着使劲，眉头皱起',
+      line: '你家抽屉是不是也这样？',
+      text: '大字「你家抽屉也这样？」压在上方三分之一处',
+      audio: '抽屉卡住的摩擦声 + 低频鼓点进入',
+      props: '木质抽屉',
+      cut: '硬切',
+    },
+    {
+      t: '0:03-0:07',
+      shot: '中景平视，轻微手持晃动',
+      action: '把散落的袜子、充电线一把推到桌面上，手掌摊开指向那堆东西',
+      line: '东西一多，找什么都找不到。',
+      text: '右侧弹出「找东西 5 分钟」',
+      audio: '布料摩擦声，鼓点持续',
+      props: '袜子、充电线',
+      cut: '叠化',
+    },
+    {
+      t: '0:07-0:12',
+      shot: '俯拍特写，镜头跟随手部移动',
+      action: '左手扶住收纳盒，右手把袜子一格一格塞进去，动作由快到慢',
+      line: '按格子分好，一眼就能看到。',
+      text: '「一格一类」贴纸逐格出现',
+      audio: '拉链与布料声，BGM 上扬',
+      props: '透明分格收纳盒',
+      cut: '硬切',
+    },
+    {
+      t: '0:12-0:16',
+      shot: '特写，仰拍抽屉口，镜头固定',
+      action: '双手扶住抽屉边缘，一推到底，抽屉顺滑合上后手停在把手上两秒',
+      line: '推回去，一点不卡。',
+      text: '「一推到底」打在画面下方',
+      audio: '合上的闷响作为重音，背景音收干',
+      props: '木质抽屉',
+      cut: '硬切',
+    },
+    {
+      t: '0:16-0:20',
+      shot: '正面半身口播，固定机位略低于视线',
+      action: '人物正对镜头，右手食指向画面下方指两次，最后摊手收尾',
+      line: '链接放下面，颜色自己挑。',
+      text: '左下角「颜色可选」角标',
+      audio: '口播为主，BGM 回落',
+      props: '收纳盒',
+      cut: '收尾淡出',
+    },
   ],
   script_text: '你家抽屉是不是也这样？\n东西一多，找什么都找不到。\n按格子分好，一眼就能看到。\n推回去，一点不卡。\n链接放下面，颜色自己挑。',
   cta: '结尾口播引导，强调“颜色可选”，不做绝对化表述。',
+  replicate_prompt: '9:16 竖屏，10 秒电商短视频。出租屋卧室抽屉柜前，左侧窗户自然光，冷色调，一名 25 岁左右女性穿灰色家居服。镜头一：俯拍特写缓慢下压，右手拽抽屉两次没拉开，肩膀使劲、皱眉；镜头二：中景手持轻晃，把袜子与充电线推到桌面并摊手；镜头三：俯拍特写跟手，左手扶透明分格收纳盒，右手逐格放入袜子；镜头四：仰拍特写固定，双手一推到底合上抽屉；镜头五：正面半身口播，右手指向画面下方。全程不许出现品牌 logo、价格与水印。',
 };
 const seen = [];
 const mock = http.createServer((req, res) => {
@@ -51,7 +105,8 @@ const mock = http.createServer((req, res) => {
     try { body = JSON.parse(buf || '{}'); } catch { /* ignore */ }
     const content = body.messages?.at(-1)?.content || [];
     const images = content.filter(c => c.type === 'image_url');
-    seen.push({ model: body.model, images: images.length, hasPrompt: !!content.find(c => c.type === 'text') });
+    const prompt = content.find(c => c.type === 'text')?.text || '';
+    seen.push({ model: body.model, images: images.length, hasPrompt: !!prompt, prompt });
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
       id: 'mock-1',
@@ -167,6 +222,21 @@ ok(Array.isArray(detail?.tagList) && detail.tagList.length === 4, '标签解析�
 ok(detail?.script_text?.includes('\n'), '口播稿保留换行');
 ok(detail?.cta?.length > 0, '收口非空');
 ok(detail?.model === 'mock-vision', '记录实际模型', detail?.model);
+
+// ---- v1.5.1：动作细节 / 拍摄设定 / 复刻提示词 ----
+const st2 = detail?.shot_setup || {};
+ok(typeof st2 === 'object' && st2.scene?.length > 4, '拍摄设定：场景', st2.scene);
+ok(['cast', 'props', 'light', 'gear', 'pace'].every(k => (st2[k] || '').length > 2), '拍摄设定六项齐全', Object.keys(st2).join(','));
+ok((detail?.segments || []).every(g => g.shot && g.action), '每段都有画面与动作');
+ok((detail?.segments || []).some(g => /右手|左手|双手/.test(g.action || '')), '动作写到具体的手/身体', detail?.segments?.[0]?.action);
+ok((detail?.segments || []).every(g => g.cut), '每段都有衔接方式');
+ok((detail?.segments || []).some(g => g.text && g.audio && g.props), '字幕 / 声音 / 道具齐全');
+ok((detail?.segments || []).every(g => !String(g.action).includes('\n')), '动作字段已压成单行');
+ok((detail?.replicate_prompt || '').length > 60, '生成 AI 复刻提示词', String(detail?.replicate_prompt?.length));
+ok((detail?.replicate_prompt || '').includes('9:16'), '复刻提示词带画幅');
+ok((seen[0]?.prompt || '').includes('"action"'), '提示词明确要求 action 字段');
+ok((seen[0]?.prompt || '').includes('"replicate_prompt"'), '提示词明确要求复刻提示词字段');
+ok((seen[0]?.prompt || '').includes('"setup"'), '提示词要求给出拍摄设定');
 
 ok(Array.isArray(detail?.frames) && detail.frames.length === 4, '抽出 4 张关键帧（AI_FRAMES=4）', String(detail?.frames?.length));
 ok((detail?.frames || []).every(f => typeof f.t === 'number' && f.path), '关键帧带时间码与路径');

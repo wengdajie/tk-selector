@@ -65,48 +65,89 @@ const SYSTEM = '你是资深 TikTok/抖音电商短视频编导，擅长把成�
 
 function buildPrompt(video, frames) {
   const marks = frames.map(f => `${mmss(f.sec)}（第 ${f.i + 1} 张图）`).join('、');
+  const dur = Math.round(video.duration || 0);
+  const portrait = (video.height || 0) > (video.width || 0);
   return [
-    `这是一条来自「${video.space === 'library' ? '素材库' : '每日选片'}」的电商短视频，时长 ${Math.round(video.duration || 0)} 秒，分辨率 ${video.width || '?'}×${video.height || '?'}。`,
+    `这是一条来自「${video.space === 'library' ? '素材库' : '每日选片'}」的电商短视频，时长 ${dur} 秒，分辨率 ${video.width || '?'}×${video.height || '?'}（${portrait ? '竖屏' : '横屏'}）。`,
     `我按时间顺序给你 ${frames.length} 张截图，时间码分别是：${marks}。`,
     '',
-    '请基于画面和常识推断内容，输出严格 JSON（字段全部使用简体中文值）：',
+    '请把这条成片逆向拆成一份「照着就能拍」的脚本，同时要能让 AI 视频生成工具照着复刻。',
+    '输出严格 JSON（所有值用简体中文）：',
     '{',
     '  "title": "8-16 字的脚本标题，带产品类型",',
     '  "summary": "一句话说清这条视频怎么卖货（30 字内）",',
     '  "hook": "前 3 秒的钩子是什么、为什么能留住人（40 字内）",',
     '  "tags": ["4-6 个标签，如 痛点开场/价格锚点/对比实验/口播带货/ASMR"],',
+    '  "setup": {',
+    '    "scene": "拍摄场景：在哪拍、背景有什么、空间关系",',
+    '    "cast": "出镜人物：几个人、年龄感、穿什么、妆发状态",',
+    '    "props": "必备道具与产品，按出现顺序列清楚",',
+    '    "light": "光线与色调：光源方向、软硬、冷暖、对比度",',
+    '    "gear": "机位与镜头感：竖/横屏、俯拍还是平视、支架还是手持、特写还是全景",',
+    '    "pace": "节奏与剪辑：平均每个镜头几秒、卡点方式、转场习惯"',
+    '  },',
     '  "segments": [',
-    '    {"t": "0:00-0:03", "shot": "画面：镜头/景别/动作/道具", "line": "这一段的字幕或口播，没有就写（无口播，仅画面）"}',
+    '    {',
+    '      "t": "0:00-0:03",',
+    '      "shot": "景别 + 机位 + 运镜，如“俯拍特写，镜头缓慢下压”",',
+    '      "action": "人物具体动作：谁、用哪只手、做什么、动作从哪到哪、表情如何变化",',
+    '      "line": "这一段的台词或口播；没有口播就写（无口播，仅画面）",',
+    '      "text": "屏幕字幕/贴纸/花字的内容与出现位置；没有就写（无）",',
+    '      "audio": "音效、BGM、语气，如“抽屉摩擦声 + 低频鼓点进入”",',
+    '      "props": "这一幕用到的道具或产品",',
+    '      "cut": "与下一段的衔接：硬切/叠化/甩镜/跟随"',
+    '    }',
     '  ],',
-    '  "script_text": "可直接给拍摄用的完整口播稿，按分段换行，200 字以内",',
-    '  "cta": "结尾的行动号召或卖点收口"',
+    '  "script_text": "可直接照着念的口播稿，按分段换行，200 字以内",',
+    '  "cta": "结尾的行动号召或卖点收口",',
+    '  "replicate_prompt": "200-350 字的复刻提示词：单段连续文字，按时间顺序交代画幅与时长、场景、人物与服装、光线色调、每个镜头的机位与运镜、人物的具体动作与道具交互、字幕位置；结尾说明禁忌（不得编造品牌与价格、不出现水印）。要能直接粘进 AI 视频生成工具生成同款视频。"',
     '}',
     '',
     '要求：',
-    '1) segments 至少 4 段，时间码要连贯覆盖整条视频，不要重叠；',
-    '2) shot 写具体拍法（如“俯拍特写，手把收纳盒推入抽屉”），不要写“展示产品”这种空话；',
-    '3) 不要编造画面里没有的品牌名或价格，不确定就不写；',
-    '4) 全部用简体中文。',
+    '1) segments 至少 4 段，时间码从 0:00 连续覆盖到片尾，不要重叠；',
+    '2) action 必须是“能让人照着做”的动作（手怎么动、身体怎么移动、眼神与表情），禁止“展示产品”这类空话；',
+    '3) shot 必须同时写景别与运镜，不能只写“特写”；',
+    '4) 画面里看不出来的（品牌名、价格、具体台词）不要编，宁可写（无）；',
+    `5) 复刻提示词里必须带上 ${dur} 秒、${portrait ? '9:16 竖屏' : '16:9 横屏'} 这两个硬信息；`,
+    '6) 全部用简体中文。',
   ].join('\n');
 }
+
+/** 单行文本：压掉换行和多余空格，截断 */
+const line = (v, n) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 
 function normalizeJson(j, video) {
   const tags = Array.isArray(j?.tags) ? j.tags.filter(Boolean).map(String).slice(0, 8) : [];
   const segments = Array.isArray(j?.segments)
-    ? j.segments.slice(0, 12).map((s, i) => ({
-        t: String(s?.t || `${mmss(i * 3)}-${mmss((i + 1) * 3)}`).slice(0, 24),
-        shot: String(s?.shot || '').slice(0, 200),
-        line: String(s?.line || '').slice(0, 240),
+    ? j.segments.slice(0, 14).map((s, i) => ({
+        t: line(s?.t, 24) || `${mmss(i * 3)}-${mmss((i + 1) * 3)}`,
+        shot: line(s?.shot, 220),
+        action: line(s?.action, 240),
+        line: line(s?.line, 240),
+        text: line(s?.text, 140),
+        audio: line(s?.audio, 140),
+        props: line(s?.props, 140),
+        cut: line(s?.cut, 90),
       }))
     : [];
+  const setup = {
+    scene: line(j?.setup?.scene, 220),
+    cast: line(j?.setup?.cast, 220),
+    props: line(j?.setup?.props, 220),
+    light: line(j?.setup?.light, 180),
+    gear: line(j?.setup?.gear, 180),
+    pace: line(j?.setup?.pace, 180),
+  };
   return {
-    title: String(j?.title || video.title || '').slice(0, 60),
-    summary: String(j?.summary || '').slice(0, 120),
-    hook: String(j?.hook || '').slice(0, 160),
+    title: line(j?.title || video.title, 60),
+    summary: line(j?.summary, 120),
+    hook: line(j?.hook, 160),
     tags: tags.join(','),
     segments: JSON.stringify(segments),
+    shot_setup: JSON.stringify(setup),
+    replicate_prompt: String(j?.replicate_prompt || '').trim().slice(0, 1500),
     script_text: String(j?.script_text || '').slice(0, 2000),
-    cta: String(j?.cta || '').slice(0, 160),
+    cta: line(j?.cta, 160),
   };
 }
 
@@ -116,6 +157,7 @@ const ins = db.prepare(`
 `);
 const updDone = db.prepare(`
   UPDATE scripts SET status='done', title=@title, summary=@summary, hook=@hook, segments=@segments,
+    shot_setup=@shot_setup, replicate_prompt=@replicate_prompt,
     script_text=@script_text, cta=@cta, tags=@tags, raw=@raw, model=@model, updated_at=@t WHERE id=@id
 `);
 const updFail = db.prepare("UPDATE scripts SET status='failed', error=?, updated_at=? WHERE id=?");
