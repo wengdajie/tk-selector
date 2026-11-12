@@ -122,6 +122,13 @@ CREATE TABLE IF NOT EXISTS scripts (
   updated_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_scripts_video ON scripts(video_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_by TEXT,
+  updated_at INTEGER NOT NULL
+);
 `);
 
 // ---------- 轻量迁移 ----------

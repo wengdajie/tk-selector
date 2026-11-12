@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../db');
 const config = require('../config');
+const settings = require('../lib/settings');
 const ai = require('../lib/ai');
 const scriptgen = require('../lib/scriptgen');
 const { requireUser } = require('../middleware');
@@ -35,8 +36,9 @@ r.get('/ai/status', requireUser, async (req, res) => {
 r.post('/videos/:id/analyze', requireUser, (req, res) => {
   const v = db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id);
   if (!v) return res.status(404).json({ error: '素材不存在' });
-  if (!config.ai.enabled) return res.status(400).json({ error: 'AI 已关闭（AI_ENABLED=0）' });
-  if (!config.ai.apiKey) return res.status(400).json({ error: '未配置 AI_API_KEY，请设置环境变量后重启容器' });
+  const ai = settings.getAi();
+  if (!ai.enabled) return res.status(400).json({ error: 'AI 已在设置里关闭' });
+  if (!ai.apiKey) return res.status(400).json({ error: '未配置 API Key，请管理员到「设置 → AI 拆解」里填写' });
 
   const job = scriptgen.createJob(v, req.user.id);
   res.status(201).json({ script: shape(job) });

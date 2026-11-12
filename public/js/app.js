@@ -84,6 +84,7 @@ const VIEW_META = {
   scripts: { title: '脚本库', sub: 'AI 把成片拆成钩子、分镜和口播稿' },
   records: { title: '下载记录', sub: '谁在什么时候拿走了哪条素材' },
   members: { title: '成员', sub: '团队账号与分工' },
+  settings: { title: '系统设置', sub: '管理员统一管理 AI 拆解等配置' },
 };
 
 /* 选片流水线：与 server/lib/scoring.js 保持一致 */
@@ -266,6 +267,7 @@ function enterApp(user, view = 'dashboard') {
   setUser(user);
   S.user = user;
   if (!S.date) S.date = ymd();
+  applyRoleUi();
   document.getElementById('auth').hidden = true;
   document.getElementById('app').hidden = false;
   const av = $('#meAvatar');
@@ -273,7 +275,21 @@ function enterApp(user, view = 'dashboard') {
   av.style.background = user.color;
   $('#meName').textContent = user.name;
   S.view = '';
-  switchView(view, true);
+  switchView(view === 'settings' && user.role !== 'admin' ? 'dashboard' : view, true);
+}
+
+/** 管理员专属入口（系统设置）按角色显隐 */
+function applyRoleUi() {
+  const isAdmin = S.user?.role === 'admin';
+  const group = document.getElementById('adminNav');
+  if (group) group.hidden = !isAdmin;
+  const m = document.querySelector('#mobileNav [data-view="settings"]');
+  if (m) m.hidden = !isAdmin;
+  const mnav = document.getElementById('mobileNav');
+  if (mnav) {
+    const cols = mnav.querySelectorAll('button:not([hidden])').length;
+    mnav.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  }
 }
 
 function openMeMenu() {
@@ -351,6 +367,10 @@ function logout() {
 /* ========================= 视图切换 ========================= */
 function switchView(view, force = false) {
   if (S.view === view && !force) return;
+  if (view === 'settings' && S.user?.role !== 'admin') {
+    toast('系统设置只有管理员能看', 'err');
+    view = 'dashboard';
+  }
   S.view = view;
   S.selected.clear();
   if (view === 'library') S.space = 'library';
@@ -364,7 +384,7 @@ function switchView(view, force = false) {
   const showSearch = ['daily', 'library', 'requests', 'scripts'].includes(view);
   const searchBox = document.querySelector('.search');
   if (searchBox) searchBox.style.display = showSearch ? '' : 'none';
-  $('#uploadBtn').style.display = ['dashboard', 'records', 'members', 'scripts'].includes(view) ? 'none' : '';
+  $('#uploadBtn').style.display = ['dashboard', 'records', 'members', 'scripts', 'settings'].includes(view) ? 'none' : '';
   S.offset = 0;
   renderToolbar();
   reload();
@@ -608,6 +628,7 @@ async function reload() {
   else if (S.view === 'scripts') await loadScripts();
   else if (S.view === 'records') await loadRecords();
   else if (S.view === 'members') await loadMembers();
+  else if (S.view === 'settings') await loadSettings();
 }
 
 /* ========================= 仪表盘 ========================= */
@@ -988,6 +1009,144 @@ async function loadMembers() {
   } catch (e) {
     $('#view').replaceChildren(emptyState({ icon: '!', title: '加载失败', message: e.message }));
   }
+}
+
+/* ========================= 系统设置（管理员） ========================= */
+async function loadSettings() {
+  $('#view').replaceChildren(skeleton(2));
+  try {
+    const data = await api('/settings/ai');
+    if (S.view === 'settings') renderSettings(data);
+  } catch (e) {
+    $('#view').replaceChildren(emptyState({ icon: '!', title: '设置加载失败', message: e.message }));
+  }
+}
+
+function renderSettings(d) {
+  const view = $('#view');
+  view.innerHTML = '';
+  const canEdit = !!d.canEdit;
+  const src = d.sources || {};
+
+  const srcDot = key => el('i', {
+    class: 'src-dot' + (src[key] === 'db' ? ' on' : ''),
+    title: src[key] === 'db' ? '正在用管理员设置值' : '环境变量默认值',
+  });
+
+  const statusChip = el('span', { class: 'pill' }, '…');
+  const modelList = el('datalist', { id: 'aiModelList' });
+  const refreshStatus = async () => {
+    statusChip.textContent = '检测中…';
+    statusChip.className = 'pill';
+    try {
+      const st = await api('/settings/ai/test');
+      if (!st.enabled) { statusChip.className = 'pill closed'; statusChip.textContent = '已关闭'; return; }
+      statusChip.className = 'pill ' + (st.reachable ? 'done' : 'high');
+      statusChip.textContent = st.reachable ? `连通正常 · ${(st.models || []).length} 个模型` : (st.error || '不可达');
+      if ((st.models || []).length) {
+        modelList.replaceChildren(...st.models.slice(0, 40).map(x => el('option', { value: x })));
+      }
+    } catch (e) {
+      statusChip.className = 'pill high';
+      statusChip.textContent = e.message;
+    }
+  };
+  refreshStatus();
+
+  const baseUrl = el('input', { value: d.baseUrl || '', disabled: !canEdit, placeholder: 'https://api.grsai.com/v1' });
+  const model = el('input', { value: d.model || '', list: 'aiModelList', disabled: !canEdit, placeholder: 'gpt-4o' });
+  const apiKey = el('input', {
+    type: 'password', autocomplete: 'new-password', disabled: !canEdit,
+    placeholder: d.apiKeyMasked ? `当前 ${d.apiKeyMasked}（留空 = 保持不变）` : 'sk-…（不填则无法拆解）',
+  });
+  const keyEye = el('button', {
+    class: 'pw-eye', type: 'button',
+    onclick: e => {
+      e.preventDefault();
+      apiKey.type = apiKey.type === 'password' ? 'text' : 'password';
+      keyEye.textContent = apiKey.type === 'password' ? '显示' : '隐藏';
+    },
+  }, '显示');
+
+  const framesSel = el('select', { disabled: !canEdit },
+    ...Array.from({ length: 8 }, (_, i) => el('option', { value: String(i + 3) }, `${i + 3} 张`)));
+  framesSel.value = String(d.frames || 6);
+
+  const enabledCb = el('input', { type: 'checkbox', disabled: !canEdit });
+  enabledCb.checked = d.enabled !== false;
+
+  const save = async () => {
+    const body = {
+      ai_base_url: baseUrl.value.trim(),
+      ai_model: model.value.trim(),
+      ai_frames: framesSel.value,
+      ai_enabled: !!enabledCb.checked,
+    };
+    if (apiKey.value.trim()) body.ai_api_key = apiKey.value.trim();
+    try {
+      await api('/settings/ai', { method: 'PUT', body });
+      toast('已保存，立即生效（无需重启容器）');
+      refreshStatus();
+      loadSettings();
+    } catch (e) { toast(e.message, 'err'); }
+  };
+
+  const clearKey = async () => {
+    if (!await confirmDialog({
+      title: '清除 API Key',
+      message: '清除后本系统将不再使用任何 Key（不会回退到环境变量），AI 拆解会不可用，直到重新填写。',
+      confirmText: '清除', danger: true,
+    })) return;
+    try {
+      await api('/settings/ai', { method: 'PUT', body: { ai_api_key: null } });
+      toast('已清除 API Key');
+      loadSettings();
+    } catch (e) { toast(e.message, 'err'); }
+  };
+
+  const form = el('div', { class: 'setform' },
+    el('div', { class: 'setstat' },
+      el('span', { class: 'mini-lbl' }, '中转站状态'),
+      statusChip,
+      el('button', { class: 'btn btn-ghost sm', onclick: refreshStatus }, '↻ 重新检测'),
+      el('span', { style: { flex: 1 } }),
+      d.apiKeyMasked ? el('span', { class: 'pill' }, `Key ${d.apiKeyMasked}`) : el('span', { class: 'pill high' }, '未配 Key'),
+    ),
+    el('div', { class: 'field-row' },
+      el('div', { class: 'field' },
+        el('label', {}, '接入地址（OpenAI 兼容）', srcDot('ai_base_url')),
+        baseUrl),
+      el('div', { class: 'field' },
+        el('label', {}, '模型（需支持图片输入）', srcDot('ai_model')),
+        model, modelList),
+    ),
+    el('div', { class: 'field-row' },
+      el('div', { class: 'field' },
+        el('label', {}, 'API Key', srcDot('ai_api_key')),
+        el('div', { class: 'pw-wrap' }, apiKey, keyEye),
+        el('p', { class: 'sethint' }, '只存本机数据库、不下发给浏览器；留空保存表示保持不变。'),
+      ),
+      el('div', { class: 'field' },
+        el('label', {}, '每条视频抽几张关键帧', srcDot('ai_frames')),
+        framesSel,
+        el('p', { class: 'sethint' }, '3-10 张；越多拆得越准、每次调用也越贵。'),
+      ),
+    ),
+    el('label', { class: 'setcheck' },
+      enabledCb,
+      el('span', {}, '启用 AI 脚本拆解'),
+      el('em', {}, '关闭后素材抽屉和批量条里的 AI 拆解入口会给出明确提示'),
+    ),
+    el('div', { class: 'sacts' },
+      canEdit ? el('button', { class: 'btn btn-primary', onclick: save }, '保存设置') : null,
+      canEdit && d.apiKeyMasked ? el('button', { class: 'btn btn-ghost', onclick: clearKey }, '清除 Key') : null,
+    ),
+    !canEdit ? el('p', { class: 'sethint' }, '当前账号不是管理员，这里只读。') : null,
+    el('p', { class: 'sethint' },
+      '规则：环境变量（AI_BASE_URL / AI_API_KEY / AI_MODEL / AI_FRAMES）是出厂默认；这里保存过的项优先生效，改完立即生效、无需重启容器。'),
+  );
+
+  view.append(panel('AI 脚本拆解', '中转站 · 模型 · 密钥，管理员统一管理', form));
 }
 
 /* ========================= 脚本库（AI 拆解） ========================= */
@@ -1442,7 +1601,12 @@ function openAiPanel() {
   openModal({
     title: 'AI 中转站状态',
     body,
-    footer: [el('button', { class: 'btn btn-ghost', onclick: () => closeModal() }, '关闭')],
+    footer: [
+      S.user?.role === 'admin'
+        ? el('button', { class: 'btn btn-primary', onclick: () => { closeModal(); switchView('settings'); } }, '去设置')
+        : null,
+      el('button', { class: 'btn btn-ghost', onclick: () => closeModal() }, '关闭'),
+    ],
   });
   api('/ai/status').then(st => {
     S.ai = st;
@@ -1460,7 +1624,7 @@ function openAiPanel() {
         : null,
       el('p', { class: 'snote' }, st.hasKey
         ? '拆解时只把抽出来的关键帧（base64）发给模型，视频文件不出内网。'
-        : '还没配置密钥：给容器加环境变量 AI_API_KEY（可选 AI_BASE_URL / AI_MODEL），重启后生效。'),
+        : '还没配置密钥：管理员到「系统设置 → AI 脚本拆解」填好保存即可，无需重启。'),
     );
   }).catch(e => {
     body.replaceChildren(emptyState({ icon: '!', title: '检查失败', message: e.message }));

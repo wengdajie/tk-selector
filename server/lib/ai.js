@@ -2,8 +2,9 @@
 /**
  * OpenAI 兼容中转站客户端（默认 grsai）。
  * 只用最小能力：chat/completions + 图片输入（data URL base64）。
+ * 配置来自 lib/settings：环境变量是默认值，管理员界面改的值优先、立即生效。
  */
-const config = require('../config');
+const settings = require('./settings');
 
 const stripFence = s => String(s || '')
   .replace(/^\s*```(?:json)?\s*/i, '')
@@ -23,15 +24,16 @@ function extractJson(text) {
 }
 
 async function postChat(body) {
-  const url = config.ai.baseUrl + '/chat/completions';
+  const ai = settings.getAi();
+  const url = ai.baseUrl + '/chat/completions';
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), config.ai.timeoutMs);
+  const timer = setTimeout(() => ctrl.abort(), ai.timeoutMs);
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${config.ai.apiKey}`,
+        authorization: `Bearer ${ai.apiKey}`,
       },
       body: JSON.stringify(body),
       signal: ctrl.signal,
@@ -54,8 +56,9 @@ async function postChat(body) {
  * @param {{system?:string, prompt:string, images?:string[], json?:boolean}} opts
  */
 async function chat({ system, prompt, images = [], json = true }) {
-  if (!config.ai.enabled) throw new Error('AI 已通过 AI_ENABLED=0 关闭');
-  if (!config.ai.apiKey) throw new Error('未配置 AI_API_KEY（设置环境变量后重启容器）');
+  const ai = settings.getAi();
+  if (!ai.enabled) throw new Error('AI 已在设置里关闭');
+  if (!ai.apiKey) throw new Error('未配置 API Key，请管理员到「设置 → AI 拆解」里填写');
 
   const content = [{ type: 'text', text: prompt }];
   for (const b64 of images) {
@@ -66,7 +69,7 @@ async function chat({ system, prompt, images = [], json = true }) {
   messages.push({ role: 'user', content });
 
   const base = {
-    model: config.ai.model,
+    model: ai.model,
     messages,
     temperature: 0.4,
     max_tokens: 2400,
@@ -86,27 +89,28 @@ async function chat({ system, prompt, images = [], json = true }) {
     text,
     json: json ? extractJson(text) : null,
     usage: data?.usage || null,
-    model: data?.model || config.ai.model,
+    model: data?.model || ai.model,
   };
 }
 
 /** 连通性自检：拉模型列表（不是所有中转站都开放，失败也算正常） */
 async function status() {
+  const ai = settings.getAi();
   const info = {
-    enabled: config.ai.enabled,
-    baseUrl: config.ai.baseUrl,
-    model: config.ai.model,
-    hasKey: !!config.ai.apiKey,
+    enabled: ai.enabled,
+    baseUrl: ai.baseUrl,
+    model: ai.model,
+    hasKey: !!ai.apiKey,
     reachable: false,
     models: null,
     error: null,
   };
-  if (!config.ai.enabled) return info;
+  if (!ai.enabled) return info;
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 8000);
-    const res = await fetch(config.ai.baseUrl + '/models', {
-      headers: config.ai.apiKey ? { authorization: `Bearer ${config.ai.apiKey}` } : {},
+    const res = await fetch(ai.baseUrl + '/models', {
+      headers: ai.apiKey ? { authorization: `Bearer ${ai.apiKey}` } : {},
       signal: ctrl.signal,
     });
     clearTimeout(t);
@@ -118,7 +122,7 @@ async function status() {
       info.error = `HTTP ${res.status}`;
     }
   } catch (e) {
-    info.error = String(e.message).slice(0, 160);
+    info.error = e?.name === 'AbortError' ? '连接超时（8 秒无响应）' : String(e.message).slice(0, 160);
   }
   return info;
 }

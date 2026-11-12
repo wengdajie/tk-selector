@@ -7,6 +7,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 const db = require('../db');
 const config = require('../config');
+const settings = require('./settings');
 const ai = require('./ai');
 const { uuid } = require('./util');
 
@@ -174,7 +175,7 @@ function createJob(video, userId) {
 
   const id = uuid();
   const now = Date.now();
-  ins.run({ id, video_id: video.id, model: config.ai.model, frames: '', created_by: userId, t: now });
+  ins.run({ id, video_id: video.id, model: settings.getAi().model, frames: '', created_by: userId, t: now });
   const row = db.prepare('SELECT * FROM scripts WHERE id = ?').get(id);
   runJob(id, video).catch(() => {});
   return row;
@@ -188,7 +189,7 @@ async function runJob(id, video) {
   active++;
   updRunning.run(Date.now(), id);
   try {
-    const frames = await extractFrames(video, config.ai.frames);
+    const frames = await extractFrames(video, settings.getAi().frames);
     db.prepare('UPDATE scripts SET frames = ? WHERE id = ?')
       .run(JSON.stringify(frames.map(f => ({ t: f.sec, path: f.path }))), id);
 

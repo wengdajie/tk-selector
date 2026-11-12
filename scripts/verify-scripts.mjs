@@ -291,6 +291,56 @@ ok(after.data.items?.length === 0, '删除后列表为空');
 const stats2 = await call('/stats', { uid });
 ok(stats2.data.scripts === 0, '删除后统计归零', String(stats2.data.scripts));
 
+// ---- v1.6.0：设置由管理员统一管理（界面改，立即生效，不重启） ----
+const setRead = await call('/settings/ai', { uid });
+ok(setRead.status === 200 && setRead.data.canEdit === true, '管理员可读设置');
+ok(setRead.data.apiKey === undefined, '接口不回传原始 Key');
+ok(/••••/.test(setRead.data.apiKeyMasked || ''), 'Key 打码显示', setRead.data.apiKeyMasked);
+ok(setRead.data.baseUrl?.includes('127.0.0.1'), '设置里读到当前生效地址');
+ok(setRead.data.sources?.ai_model === 'env', '未改过的项标记为环境变量默认', JSON.stringify(setRead.data.sources));
+
+const badPut = await call('/settings/ai', {
+  method: 'PUT', uid, body: { ai_base_url: 'not-a-url' },
+});
+ok(badPut.status === 400, '非法地址被拒', JSON.stringify(badPut.data));
+
+const dup = await call('/users', { method: 'POST', body: { name: '设置验证-运营', password: 'op12345678', role: 'ops' } });
+const opUid = dup.data.user?.id;
+ok(!!opUid, '创建一个普通运营账号');
+const opPut = await call('/settings/ai', { method: 'PUT', uid: opUid, body: { ai_model: 'hack' } });
+ok(opPut.status === 403, '普通成员改设置被拒', String(opPut.status));
+const opRead = await call('/settings/ai', { uid: opUid });
+ok(opRead.status === 200 && opRead.data.canEdit === false, '普通成员只读');
+
+// 管理员改成另一个模型 → 不重启，下一次拆解立即用新模型
+const setPut = await call('/settings/ai', {
+  method: 'PUT', uid, body: { ai_model: 'mock-vision-2', ai_frames: '5' },
+});
+ok(setPut.status === 200 && setPut.data.model === 'mock-vision-2', '保存新模型立即生效');
+ok(setPut.data.sources?.ai_model === 'db', '改过的项标记为管理员设置值', JSON.stringify(setPut.data.sources));
+
+const reAnalyze = await call(`/videos/${vid}/analyze`, { method: 'POST', uid });
+const sid2 = reAnalyze.data.script?.id;
+let detail2 = null;
+for (let i = 0; i < 60; i++) {
+  await sleep(1000);
+  const r = await call('/scripts/' + sid2, { uid });
+  detail2 = r.data.script;
+  if (detail2 && (detail2.status === 'done' || detail2.status === 'failed')) break;
+}
+ok(detail2?.status === 'done' && detail2?.model === 'mock-vision-2', '改设置后拆解直接用新模型（无需重启）', `${detail2?.status}/${detail2?.model}`);
+ok(seen.at(-1)?.model === 'mock-vision-2', '请求体里的模型也是新值');
+ok((detail2?.frames || []).length === 5, '抽帧数设置生效（AI_FRAMES=5）', String(detail2?.frames?.length));
+ok(seen.at(-1)?.images === 5, '新一次调用带 5 张图');
+
+// 清掉 Key → 拆解应明确报错
+const clearKey = await call('/settings/ai', { method: 'PUT', uid, body: { ai_api_key: null } });
+ok(clearKey.status === 200 && clearKey.data.apiKeyMasked === '', '清除 Key 后显示未配置');
+const noKey = await call(`/videos/${vid}/analyze`, { method: 'POST', uid });
+ok(noKey.status === 400 && /未配置/.test(noKey.data.error || ''), '无 Key 时拆解给出明确提示', JSON.stringify(noKey.data));
+// 还原（给下一段用）
+await call('/settings/ai', { method: 'PUT', uid, body: { ai_api_key: 'sk-mock-key', ai_model: 'mock-vision', ai_frames: '4' } });
+
 // 无 uid 的受保护接口
 const noAuth = await call('/scripts');
 ok(noAuth.status === 401, '未登录访问脚本列表被拒', String(noAuth.status));
