@@ -1,0 +1,24 @@
+# TK 选片工作台 —— 直接用 GHCR 镜像部署（无需本地构建）
+# 群晖 Container Manager：项目 → 新增 → 选择「创建 docker-compose.yml」→ 粘贴本文件内容
+services:
+  tk-selector:
+    image: ghcr.io/wengdajie/tk-selector:latest
+    container_name: tk-selector
+    restart: unless-stopped
+    ports:
+      - "8899:8080"
+    environment:
+      TZ: Asia/Shanghai
+      # 群晖：控制面板 → 用户 → 你的账号 → 查看 UID/GID（首个用户通常是 1026/100）
+      PUID: "1026"
+      PGID: "100"
+      SCAN_DIR: /watch
+      SCAN_MODE: copy          # copy 复制进库 | move 移动（投递目录会被清空）| link
+      SCAN_INTERVAL: "300"     # 秒；0 = 关闭定时扫描，只手动触发
+      ADMIN_NAME: 管理员
+      MAX_UPLOAD_MB: "8192"
+      # AI 拆解 / 群通知 / API Key 建议部署后在网页「系统 → 系统设置」里填（保存即生效）
+    volumes:
+      - ./data:/data
+      # 拍摄投递目录：按你的共享文件夹真实路径修改，只读挂载
+      # - /volume1/拍摄投递:/watch:ro

@@ -271,20 +271,25 @@ curl -fsSL https://raw.githubusercontent.com/wengadajie/tk-selector/main/scripts
 
 脚本会：备份 `public`/`server` → 从 GitHub 下载最新源码 → 覆盖（不动 `data`）→ 重启容器 → 打印当前版本。整个过程十几秒。
 
-### 方式 B：用 CI 构建好的镜像
+### 方式 B：用 CI 构建好的镜像（推荐，不用在本机构建）
 
-仓库里的 GitHub Actions 会在每次 push 后自动构建镜像并推到 GHCR（`ghcr.io/wengadajie/tk-selector:latest`，linux/amd64）。群晖上把 compose 的 `build: .` 换成 `image:` 即可：
+仓库里的 GitHub Actions 会在每次 push 后自动构建镜像并推到 GHCR（`ghcr.io/wengdajie/tk-selector`，linux/amd64，公开镜像**拉取无需登录**）。
 
-```yaml
-services:
-  tk-selector:
-    image: ghcr.io/wengadajie/tk-selector:latest
-    # build: .        ← 删掉这行
+**首次安装（群晖 Container Manager）**：
+
+1. 在 File Station 建项目目录（如 `/volume1/docker/tk-selector`），在里面建空 `data` 文件夹
+2. Container Manager → 项目 → 新增 → 选择「创建 docker-compose.yml」，粘贴仓库里 `deploy/docker-compose.ghcr.yml` 的内容（按需改端口、PUID/PGID、拍摄投递目录）
+3. 下一步 → 完成，首次会自动 `docker pull`
+
+**日常更新**：把 `deploy/update.sh` 放到同一个目录，SSH 执行一次即可：
+
+```bash
+sh update.sh          # 拉最新镜像 → 重建容器 → 清旧镜像 → 打印当前版本
 ```
 
-升级：`docker compose pull && docker compose up -d`（或 Container Manager 里「操作 → 拉取镜像并重启」）。
+等价于 `docker compose pull && docker compose up -d`；Container Manager 里也可以点「操作 → 拉取镜像并重启」。
 
-> 国内 NAS 拉 GHCR 可能很慢，若卡住请用方式 A。
+**要固定某个版本**：把 image 改成带版本号的标签，例如 `ghcr.io/wengdajie/tk-selector:v1.7.0`（每次发版都会同时打 `latest` 和 `vX.Y.Z`）。
 
 ### 怎么确认升级成功
 
