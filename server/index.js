@@ -52,6 +52,7 @@ app.use('/api', require('./routes/downloads'));
 app.use('/api', require('./routes/requests'));
 app.use('/api', require('./routes/stats'));
 app.use('/api', require('./routes/dashboard'));
+app.use('/api', require('./routes/scripts'));
 
 // 手动触发目录扫描
 app.post('/api/scan', requireUser, async (req, res) => {

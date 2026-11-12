@@ -35,4 +35,14 @@ module.exports = {
 
   maxUploadBytes: Number(process.env.MAX_UPLOAD_MB || 4096) * 1024 * 1024,
   tz: process.env.TZ || 'Asia/Shanghai',
+
+  // ---- AI 脚本拆解（OpenAI 兼容中转站，默认 grsai）----
+  ai: {
+    enabled: String(process.env.AI_ENABLED || '1') !== '0',
+    baseUrl: (process.env.AI_BASE_URL || 'https://api.grsai.com/v1').replace(/\/+$/, ''),
+    apiKey: process.env.AI_API_KEY || '',
+    model: process.env.AI_MODEL || 'gpt-4o',
+    frames: Math.min(10, Math.max(3, Number(process.env.AI_FRAMES || 6))),
+    timeoutMs: Number(process.env.AI_TIMEOUT_MS || 120000),
+  },
 };

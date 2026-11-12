@@ -69,6 +69,11 @@ const S = {
   reqCounts: {},
   reqFilter: 'active',
   members: [],
+  scripts: [],
+  scriptCounts: {},
+  scriptFilter: 'all',
+  drawerScripts: [],
+  ai: null,
 };
 
 const VIEW_META = {
@@ -76,6 +81,7 @@ const VIEW_META = {
   daily: { title: '每日选片', sub: '拍摄投递的素材，挑一条开干' },
   library: { title: '素材库', sub: '沉淀下来的通用素材，随时取用' },
   requests: { title: '视频需求', sub: '运营发需求，拍摄认领交付' },
+  scripts: { title: '脚本库', sub: 'AI 把成片拆成钩子、分镜和口播稿' },
   records: { title: '下载记录', sub: '谁在什么时候拿走了哪条素材' },
   members: { title: '成员', sub: '团队账号与分工' },
 };
@@ -128,6 +134,8 @@ async function init() {
       enterApp(r.user, VIEW_META[view] ? view : 'dashboard');
       const openId = params.get('open');
       if (openId) setTimeout(() => openVideo(openId), 400);
+      const scriptId = params.get('script');
+      if (scriptId) setTimeout(() => openScript(scriptId), 400);
       if (params.get('panel') === 'upload') setTimeout(() => openUploader(), 500);
       return;
     } catch { /* 登录态失效，走登录页 */ }
@@ -353,10 +361,10 @@ function switchView(view, force = false) {
   $('#viewSub').textContent = meta.sub;
   document.querySelectorAll('#nav button, #navMain button, #mobileNav button')
     .forEach(b => b.classList.toggle('on', b.dataset.view === view));
-  const showSearch = ['daily', 'library', 'requests'].includes(view);
+  const showSearch = ['daily', 'library', 'requests', 'scripts'].includes(view);
   const searchBox = document.querySelector('.search');
   if (searchBox) searchBox.style.display = showSearch ? '' : 'none';
-  $('#uploadBtn').style.display = ['dashboard', 'records', 'members'].includes(view) ? 'none' : '';
+  $('#uploadBtn').style.display = ['dashboard', 'records', 'members', 'scripts'].includes(view) ? 'none' : '';
   S.offset = 0;
   renderToolbar();
   reload();
@@ -373,6 +381,7 @@ function renderToolbar() {
     bar.append(renderFilterBar());
   }
   if (S.view === 'requests') bar.append(renderReqFilter());
+  if (S.view === 'scripts') bar.append(renderScriptBar());
 }
 
 function renderDateBar() {
@@ -596,6 +605,7 @@ async function reload() {
   if (S.view === 'dashboard') await loadDashboard();
   else if (S.view === 'daily' || S.view === 'library') await loadVideos();
   else if (S.view === 'requests') await loadRequests();
+  else if (S.view === 'scripts') await loadScripts();
   else if (S.view === 'records') await loadRecords();
   else if (S.view === 'members') await loadMembers();
 }
@@ -650,12 +660,15 @@ function pipelinePanel() {
   const p = S.pipeline;
   if (!p) return panel('选片流水线', '', emptyState({ icon: '◇', title: '暂无数据', message: '素材入库后会自动进入流水线' }));
   const scale = Math.max(1, p.total);
+  const countOf = k => (p.stages || []).find(s => s.key === k)?.count || 0;
+  const reviewed = Math.max(0, p.total - countOf('new'));
+  const finals = countOf('final');
   const body = el('div', {},
     el('div', { class: 'qc-head' },
       el('div', { class: 'qc-score ' + (p.passRate >= 50 ? 'good' : p.passRate >= 25 ? 'mid' : 'bad') }, String(p.passRate)),
       el('div', { style: { flex: 1, minWidth: 0 } },
         el('div', { class: 'qc-title' }, `通过率 ${p.passRate}%`),
-        el('div', { class: 'qc-sub' }, `已评审 ${Math.max(0, reviewed)} 条 · 定稿 ${finals} 条 · 共 ${p.total} 条`),
+        el('div', { class: 'qc-sub' }, `已评审 ${reviewed} 条 · 定稿 ${finals} 条 · 共 ${p.total} 条`),
       ),
       el('button', { class: 'btn btn-ghost sm', onclick: () => switchView('daily') }, '去选片 →'),
     ),
@@ -977,6 +990,415 @@ async function loadMembers() {
   }
 }
 
+/* ========================= 脚本库（AI 拆解） ========================= */
+const SCRIPT_STATE = {
+  pending: { label: '排队中', cls: 'wait' },
+  running: { label: '拆解中', cls: 'run' },
+  done: { label: '已拆解', cls: 'ok' },
+  failed: { label: '失败', cls: 'err' },
+};
+const scriptState = st => SCRIPT_STATE[st] || { label: st || '未知', cls: 'wait' };
+const frameUrl = (s, i) => mediaUrl(`/api/scripts/${s.id}/frames/${i}`);
+
+function scriptBadge(st) {
+  const m = scriptState(st);
+  return el('span', { class: `sbadge ${m.cls}` },
+    (st === 'pending' || st === 'running') ? el('i', { class: 'sdot' }) : null,
+    m.label);
+}
+
+function renderScriptBar() {
+  const bar = el('div', { class: 'filterbar' });
+  const c = S.scriptCounts || {};
+  const total = Object.values(c).reduce((a, b) => a + b, 0);
+  const seg = el('div', { class: 'seg' });
+  const items = [
+    ['all', '全部', total],
+    ['done', '已拆解', c.done || 0],
+    ['running', '进行中', (c.pending || 0) + (c.running || 0)],
+    ['failed', '失败', c.failed || 0],
+  ];
+  for (const [k, label, n] of items) {
+    seg.append(el('button', {
+      class: S.scriptFilter === k ? 'on' : '',
+      onclick: () => { S.scriptFilter = k; renderToolbar(); loadScripts(); },
+    }, n ? `${label} ${n}` : label));
+  }
+  bar.append(seg, el('div', { class: 'spacer' }));
+  bar.append(el('button', {
+    class: 'btn btn-ghost sm',
+    title: '检查中转站连通性与模型配置',
+    onclick: openAiPanel,
+  }, '◇ AI 状态'));
+  return bar;
+}
+
+async function loadScripts() {
+  if (!S.scripts.length) $('#view').replaceChildren(skeleton(4));
+  try {
+    const p = new URLSearchParams();
+    if (S.q) p.set('q', S.q);
+    if (S.scriptFilter !== 'all') p.set('status', S.scriptFilter);
+    const data = await api('/scripts?' + p);
+    S.scripts = data.items || [];
+    S.scriptCounts = data.counts || {};
+    renderToolbar();
+    renderScripts();
+  } catch (e) {
+    $('#view').replaceChildren(emptyState({ icon: '!', title: '脚本库加载失败', message: e.message }));
+  }
+}
+
+function renderScripts() {
+  const view = $('#view');
+  view.innerHTML = '';
+
+  if (!S.scripts.length) {
+    view.append(emptyState({
+      icon: '✦',
+      title: S.q ? '没有匹配的脚本' : '脚本库还是空的',
+      message: S.q
+        ? '换个关键词，脚本标题、标签和口播稿都会被搜到'
+        : '打开任意素材，点一下「AI 拆解」，成片会被拆成钩子、分镜和可直接开拍的口播稿',
+      action: el('button', {
+        class: 'btn btn-primary',
+        onclick: () => switchView(S.space === 'library' ? 'library' : 'daily'),
+      }, '去挑素材'),
+    }));
+    return;
+  }
+
+  const wrap = el('div', { class: 'sgrid' });
+  for (const s of S.scripts) wrap.append(scriptCard(s));
+  view.append(wrap);
+}
+
+function scriptCard(s) {
+  const frames = s.frames || [];
+  return el('article', {
+    class: `scard st-${s.status}`,
+    onclick: () => openScript(s.id),
+  },
+    el('div', { class: 'scard-cover' },
+      frames.length
+        ? el('img', { src: frameUrl(s, 0), alt: '', loading: 'lazy' })
+        : el('div', { class: 'ph' }, '✦'),
+      el('div', { class: 'scard-grad' }),
+      el('div', { class: 'scard-top' }, scriptBadge(s.status)),
+      frames.length > 1
+        ? el('div', { class: 'scard-frames' }, el('b', {}, String(frames.length)), ' 帧')
+        : null,
+    ),
+    el('div', { class: 'scard-body' },
+      el('h3', {}, s.title || s.video_title || '未命名脚本'),
+      s.summary
+        ? el('p', { class: 'sum' }, s.summary)
+        : (s.status === 'failed' ? el('p', { class: 'sum err' }, s.error || '拆解失败') : null),
+      s.hook ? el('p', { class: 'hook' }, el('em', {}, '钩子'), s.hook) : null,
+      (s.tagList || []).length
+        ? el('div', { class: 'scard-tags' }, ...s.tagList.slice(0, 4).map(t => el('span', { class: 'pill' }, t)))
+        : null,
+      el('div', { class: 'scard-foot' },
+        el('span', { class: 'src', title: s.video_title || '' }, s.video_title || '来源素材已删除'),
+        el('span', { class: 'tm' }, timeAgo(s.updated_at || s.created_at)),
+      ),
+    ),
+  );
+}
+
+/** 关键帧横向条 */
+function frameStrip(s) {
+  const frames = s.frames || [];
+  if (!frames.length) return null;
+  return el('div', { class: 'fstrip' },
+    ...frames.map((f, i) => el('button', {
+      class: 'fcell',
+      title: `第 ${fmtDuration(f.t)} 的关键帧 · 点击看大图`,
+      onclick: () => window.open(frameUrl(s, i), '_blank', 'noopener'),
+    },
+      el('img', { src: frameUrl(s, i), alt: '', loading: 'lazy' }),
+      el('span', {}, fmtDuration(f.t)),
+    )),
+  );
+}
+
+/** 复制（http 内网环境下 navigator.clipboard 不可用，走 execCommand 兜底） */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* 落到兜底 */ }
+  try {
+    const ta = el('textarea', { style: { position: 'fixed', top: '-1000px', left: '0', opacity: '0' } });
+    ta.value = text;
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+
+function downloadScript(s) {
+  const name = String(s.title || '脚本').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+  const lines = [
+    s.title || '未命名脚本',
+    '',
+    s.summary ? `一句话：${s.summary}` : '',
+    s.hook ? `钩子：${s.hook}` : '',
+    (s.tagList || []).length ? `标签：${s.tagList.join(' / ')}` : '',
+    '',
+    '【分镜】',
+    ...(s.segments || []).map((g, i) => `${i + 1}. ${g.t}\n   画面：${g.shot}\n   台词：${g.line}`),
+    '',
+    '【口播稿】',
+    s.script_text || '',
+    '',
+    s.cta ? `【收口】${s.cta}` : '',
+  ].filter(x => x !== '').join('\n');
+  const url = URL.createObjectURL(new Blob([lines], { type: 'text/plain;charset=utf-8' }));
+  const a = el('a', { href: url, download: `${name}.txt` });
+  document.body.append(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+}
+
+/** 详情内容（按状态分三种形态） */
+function scriptDetail(s, actions) {
+  if (s.status === 'pending' || s.status === 'running') {
+    return [
+      el('div', { class: 'sprog' },
+        el('span', { class: 'spin' }),
+        el('div', {},
+          el('b', {}, s.status === 'pending' ? '排队中，马上开始' : '正在拆解…'),
+          el('p', {}, '抽关键帧 → 逐帧看画面 → 归纳钩子与分镜，通常 20~60 秒。'),
+        ),
+      ),
+      frameStrip(s),
+      el('p', { class: 'snote' }, '关掉这个窗口也没关系，任务在服务端继续跑，完成后到「脚本库」看结果。'),
+    ].filter(Boolean);
+  }
+
+  if (s.status === 'failed') {
+    return [
+      el('div', { class: 'sfail' },
+        el('b', {}, '拆解失败'),
+        el('p', {}, s.error || '模型没有返回可用的结果，可以直接重试'),
+      ),
+      el('div', { class: 'sacts' },
+        el('button', { class: 'btn btn-primary', onclick: actions.retry }, '↻ 重新拆解'),
+        el('button', { class: 'btn btn-ghost', onclick: () => { closeModal(); openVideo(s.video_id); } }, '看原素材'),
+      ),
+    ];
+  }
+
+  const segs = s.segments || [];
+  const text = s.script_text || '';
+
+  return [
+    el('div', { class: 'shead' },
+      el('div', { class: 'shead-top' },
+        el('div', { class: 'stag' },
+          ...(s.tagList || []).map(t => el('span', { class: 'pill' }, t))),
+        el('span', { class: 'sfrom' },
+          '源素材 ', el('b', { title: s.video_title || '' }, s.video_title || '已删除')),
+      ),
+    ),
+    s.summary ? el('p', { class: 'slead' }, s.summary) : null,
+    s.hook
+      ? el('div', { class: 'shook' },
+          el('span', { class: 'mini-lbl' }, '前 3 秒钩子'),
+          el('p', {}, s.hook))
+      : null,
+    frameStrip(s),
+    segs.length
+      ? el('div', { class: 'segwrap' },
+          el('div', { class: 'seghead' },
+            el('span', {}, '时间'),
+            el('span', {}, '画面 / 拍法'),
+            el('span', {}, '台词 / 字幕'),
+          ),
+          ...segs.map(g => el('div', { class: 'segrow' },
+            el('span', { class: 'st' }, g.t),
+            el('span', { class: 'ss' }, g.shot || '—'),
+            el('span', { class: 'sl' }, g.line || '—'),
+          )),
+        )
+      : el('p', { class: 'snote' }, '模型没有给出分镜，可以重新拆解一次试试。'),
+    text
+      ? el('div', { class: 'stext' },
+          el('div', { class: 'stext-head' },
+            el('span', { class: 'mini-lbl' }, '口播稿'),
+            el('span', { style: { flex: 1 } }),
+            el('button', {
+              class: 'btn btn-ghost sm',
+              onclick: async () => {
+                const ok = await copyText(text);
+                toast(ok ? '已复制口播稿' : '复制失败，请手动选中', ok ? 'ok' : 'err');
+              },
+            }, '复制'),
+            el('button', { class: 'btn btn-ghost sm', onclick: () => downloadScript(s) }, '↓ .txt'),
+          ),
+          el('pre', {}, text),
+        )
+      : null,
+    s.cta
+      ? el('div', { class: 'scta' },
+          el('span', { class: 'mini-lbl' }, '收口 / CTA'),
+          el('p', {}, s.cta))
+      : null,
+    el('div', { class: 'sacts' },
+      el('button', { class: 'btn btn-primary', onclick: async () => {
+        const ok = await copyText([
+          s.title || '',
+          text,
+          segs.length ? '\n【分镜】\n' + segs.map((g, i) => `${i + 1}. ${g.t} ${g.shot}`).join('\n') : '',
+        ].filter(Boolean).join('\n'));
+        toast(ok ? '已复制整份脚本' : '复制失败，请用 .txt 导出', ok ? 'ok' : 'err');
+      } }, '复制整份'),
+      el('button', { class: 'btn btn-ghost', onclick: () => { closeModal(); openVideo(s.video_id); } }, '看原素材'),
+      el('button', { class: 'btn btn-ghost', onclick: actions.retry }, '↻ 重新拆解'),
+      actions.delBtn,
+    ),
+    el('p', { class: 'snote' },
+      `模型 ${s.model || '—'} · 生成于 ${new Date(s.updated_at || s.created_at).toLocaleString('zh-CN', { hour12: false })}`),
+  ].filter(Boolean);
+}
+
+function openScript(id) {
+  let current = null;
+  let timer = null;
+  let stopped = false;
+
+  const body = el('div', { class: 'modal-body sdetail' },
+    el('div', { class: 'sprog' }, el('span', { class: 'spin' }), el('div', {}, el('b', {}, '正在读取脚本…'))));
+  const m = openModal({
+    title: '脚本详情',
+    body,
+    wide: true,
+    onClose: () => { stopped = true; clearTimeout(timer); },
+  });
+  m.card.classList.add('script-modal');
+
+  // 两步确认，避免在弹层里再叠一个确认框
+  const delBtn = el('button', { class: 'btn btn-ghost' }, '删除');
+  let armed = false;
+  delBtn.addEventListener('click', async () => {
+    if (!current) return;
+    if (!armed) {
+      armed = true;
+      delBtn.textContent = '确认删除？';
+      delBtn.classList.add('btn-danger');
+      setTimeout(() => {
+        armed = false;
+        delBtn.textContent = '删除';
+        delBtn.classList.remove('btn-danger');
+      }, 4000);
+      return;
+    }
+    try {
+      await api('/scripts/' + current.id, { method: 'DELETE' });
+      stopped = true;
+      clearTimeout(timer);
+      closeModal();
+      toast('脚本已删除');
+      if (S.view === 'scripts') loadScripts();
+      refreshStats();
+    } catch (e) { toast(e.message, 'err'); }
+  });
+
+  const actions = {
+    delBtn,
+    retry: async () => {
+      if (!current) return;
+      try {
+        await api(`/scripts/${current.id}/retry`, { method: 'POST' });
+        toast('已重新提交拆解');
+        paint({ ...current, status: 'pending', error: '' });
+        poll();
+      } catch (e) { toast(e.message, 'err'); }
+    },
+  };
+
+  function paint(s) {
+    current = s;
+    const h = m.card.querySelector('.modal-head h3');
+    if (h) h.textContent = s.title || '脚本详情';
+    body.replaceChildren(...scriptDetail(s, actions));
+  }
+
+  async function poll() {
+    clearTimeout(timer);
+    if (stopped) return;
+    try {
+      const { script } = await api('/scripts/' + id);
+      if (stopped) return;
+      paint(script);
+      if (script.status === 'pending' || script.status === 'running') {
+        timer = setTimeout(poll, 2600);
+      } else {
+        refreshStats();
+        if (S.view === 'scripts') loadScripts();
+      }
+    } catch (e) {
+      if (!stopped) body.replaceChildren(emptyState({ icon: '!', title: '读取失败', message: e.message }));
+    }
+  }
+
+  poll();
+}
+
+/** 触发拆解：从抽屉或列表调用；给了 scriptId 就是在这条上重拆 */
+async function analyzeVideo(v, onNew, scriptId = null) {
+  try {
+    const r = scriptId
+      ? { script: (await api(`/scripts/${scriptId}/retry`, { method: 'POST' })).job }
+      : await api(`/videos/${v.id}/analyze`, { method: 'POST' });
+    toast(r.script.status === 'done' ? '已生成脚本' : '已提交 AI 拆解');
+    onNew?.(r.script);
+    openScript(r.script.id);
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function aiRow(k, v, cls = '') {
+  return el('div', { class: 'ai-row' },
+    el('span', { class: 'k' }, k),
+    el('span', { class: 'v ' + cls }, v ?? '—'));
+}
+
+function openAiPanel() {
+  const body = el('div', { class: 'modal-body' },
+    el('div', { class: 'sprog' }, el('span', { class: 'spin' }), el('div', {}, el('b', {}, '正在检查中转站…'))));
+  openModal({
+    title: 'AI 中转站状态',
+    body,
+    footer: [el('button', { class: 'btn btn-ghost', onclick: () => closeModal() }, '关闭')],
+  });
+  api('/ai/status').then(st => {
+    S.ai = st;
+    body.replaceChildren(
+      el('div', { class: 'ai-grid' },
+        aiRow('接入地址', st.baseUrl),
+        aiRow('模型', st.model),
+        aiRow('API Key', st.hasKey ? '已配置' : '未配置', st.hasKey ? 'ok' : 'err'),
+        aiRow('连通性', st.reachable ? '正常' : (st.error || '不可达'), st.reachable ? 'ok' : 'err'),
+      ),
+      (st.models || []).length
+        ? el('div', {},
+            el('div', { class: 'mini-lbl', style: { marginBottom: '7px' } }, `可用模型 ${st.models.length}`),
+            el('div', { class: 'ai-models' }, ...st.models.slice(0, 30).map(x => el('span', { class: 'pill' }, x))))
+        : null,
+      el('p', { class: 'snote' }, st.hasKey
+        ? '拆解时只把抽出来的关键帧（base64）发给模型，视频文件不出内网。'
+        : '还没配置密钥：给容器加环境变量 AI_API_KEY（可选 AI_BASE_URL / AI_MODEL），重启后生效。'),
+    );
+  }).catch(e => {
+    body.replaceChildren(emptyState({ icon: '!', title: '检查失败', message: e.message }));
+  });
+}
+
 async function refreshStats() {
   try {
     const [s, pipe] = await Promise.all([
@@ -989,6 +1411,8 @@ async function refreshStats() {
     document.querySelector('[data-cnt="library"]').textContent = s.library || '';
     document.querySelector('[data-cnt="requests"]').textContent = s.requestsOpen || '';
     document.querySelector('[data-cnt="members"]').textContent = s.members || '';
+    const scrEl = document.querySelector('[data-cnt="scripts"]');
+    if (scrEl) scrEl.textContent = s.scripts || '';
     document.getElementById('todayDl').textContent = s.downloadsToday ?? 0;
     if (s.scanDir) {
       const dirEl = document.getElementById('scanDir');
@@ -1340,6 +1764,29 @@ async function onBulkAction(e) {
     } catch (err) { toast(err.message, 'err'); }
     return;
   }
+  if (act === 'analyze') {
+    if (!await confirmDialog({
+      title: 'AI 批量拆解',
+      message: `将把 ${ids.length} 条素材加入拆解队列。每条会抽 6 张关键帧调一次多模态模型，视频多时需要几分钟，完成结果进「脚本库」。`,
+      confirmText: '开始拆解',
+    })) return;
+    S.selected.clear();
+    updateBulkBar();
+    let ok = 0, bad = 0;
+    const queue = [...ids];
+    const worker = async () => {
+      while (queue.length) {
+        const id = queue.shift();
+        try { await api(`/videos/${id}/analyze`, { method: 'POST' }); ok++; }
+        catch { bad++; }
+      }
+    };
+    toast(`已提交 ${ids.length} 条，正在排队拆解…`, 'ok', 2000);
+    await Promise.all([worker(), worker(), worker()]);
+    toast(bad ? `提交完成：${ok} 条成功，${bad} 条失败` : `已提交 ${ok} 条，稍后到「脚本库」查看`, bad ? 'err' : 'ok');
+    refreshStats();
+    return;
+  }
   if (act === 'export') {
     const url = `/api/export.csv?ids=${ids.join(',')}&uid=${encodeURIComponent(S.user.id)}`;
     const a = document.createElement('a');
@@ -1392,6 +1839,11 @@ async function openVideo(id) {
       el('div', { class: 'drawer-panel' }, emptyState({ icon: '!', title: '打开失败', message: e.message })));
     return;
   }
+  // 已有脚本（没有也不影响打开抽屉）
+  try {
+    const r = await api('/scripts?videoId=' + id);
+    data.scripts = r.items || [];
+  } catch { data.scripts = []; }
   renderDrawer(data);
 }
 
@@ -1399,11 +1851,14 @@ function closeDrawer() {
   const root = document.getElementById('drawer');
   root.hidden = true;
   root.innerHTML = '';
+  S.drawerScripts = [];
 }
 
-function renderDrawer({ video: v, comments, downloads, siblings, similar }) {
+function renderDrawer({ video: v, comments, downloads, siblings, similar, scripts }) {
   const root = document.getElementById('drawer');
   root.innerHTML = '';
+  if (scripts) S.drawerScripts = scripts;
+  const myScripts = S.drawerScripts || [];
   const landscape = v.width > v.height;
 
   const player = el('div', { class: 'player' + (landscape ? ' landscape' : '') });
@@ -1682,7 +2137,47 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar }) {
     cmtList,
   );
 
-  scroll.append(player, sec1, actSec, scoreSec, qcSec);
+  // ---- AI 脚本 ----
+  const aiList = el('div', { class: 'ai-list' });
+  const paintAi = () => {
+    if (!myScripts.length) {
+      aiList.replaceChildren(el('p', { class: 'ai-empty' },
+        '把这条成片交给 AI，拆出钩子、分镜和能直接开拍的口播稿；结果会自动进「脚本库」。'));
+      return;
+    }
+    aiList.replaceChildren(...myScripts.slice(0, 4).map(s => el('button', {
+      class: 'ai-item',
+      onclick: () => openScript(s.id),
+    },
+      scriptBadge(s.status),
+      el('span', { class: 't' }, s.title || s.video_title || '待生成标题'),
+      el('span', { class: 'tm' }, timeAgo(s.updated_at || s.created_at)),
+    )));
+  };
+  paintAi();
+
+  const aiSec = el('div', { class: 'dsec' },
+    el('div', { class: 'ai-head' },
+      el('span', { class: 'mini-lbl' }, 'AI 脚本'),
+      el('span', { style: { flex: 1 } }),
+      el('button', {
+        class: 'btn btn-ghost sm',
+        onclick: () => {
+          // 已有结果就在原记录上重拆，没有才新建
+          const prev = myScripts.find(x => x.status === 'done' || x.status === 'failed');
+          analyzeVideo(v, job => {
+            const rest = myScripts.filter(x => x.id !== job.id);
+            myScripts.splice(0, myScripts.length, job, ...rest);
+            S.drawerScripts = myScripts;
+            paintAi();
+          }, prev?.id || null);
+        },
+      }, myScripts.length ? '✦ 再拆一次' : '✦ AI 拆解'),
+    ),
+    aiList,
+  );
+
+  scroll.append(player, sec1, actSec, aiSec, scoreSec, qcSec);
   if (siblings?.length) {
     scroll.append(el('div', { class: 'dsec' },
       el('div', { class: 'mini-lbl', style: { marginBottom: '8px' } }, '同一需求下的其他素材'),

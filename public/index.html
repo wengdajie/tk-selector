@@ -141,6 +141,10 @@
           <i class="ni"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4h8a2 2 0 0 1 2 2v14l-6-3-6 3V6a2 2 0 0 1 2-2z"/><path d="M9 9h6M9 12.5h4"/></svg></i>
           <span>视频需求</span><b class="cnt" data-cnt="requests"></b>
         </button>
+        <button data-view="scripts">
+          <i class="ni"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v4h4M9.5 12h5M9.5 15.5h3.5"/></svg></i>
+          <span>脚本库</span><b class="cnt" data-cnt="scripts"></b>
+        </button>
         <button data-view="records">
           <i class="ni"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M8 10.5l4 3.5 4-3.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></i>
           <span>下载记录</span>
@@ -198,6 +202,7 @@
   <button data-view="daily"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18M8 4V2M16 4V2"/></svg><span>选片</span></button>
   <button data-view="library"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2.5h5.5A2.5 2.5 0 0 1 20 10v7.5A2.5 2.5 0 0 1 17.5 20h-11A2.5 2.5 0 0 1 4 17.5z"/></svg><span>素材</span></button>
   <button data-view="requests"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 4h8a2 2 0 0 1 2 2v14l-6-3-6 3V6a2 2 0 0 1 2-2z"/></svg><span>需求</span></button>
+  <button data-view="scripts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v4h4M9.5 12h5M9.5 15.5h3.5"/></svg><span>脚本</span></button>
   <button data-view="records"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3v11M8 10.5l4 3.5 4-3.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg><span>记录</span></button>
 </nav>
 
@@ -208,6 +213,7 @@
     <button data-act="clear" class="btn btn-ghost">取消</button>
     <button data-act="rate" class="btn btn-ghost">评分</button>
     <button data-act="qc" class="btn btn-ghost">重新体检</button>
+    <button data-act="analyze" class="btn btn-ghost">✦ AI 拆解</button>
     <button data-act="pick" class="btn btn-ghost">标记已选</button>
     <button data-act="library" class="btn btn-ghost">存入素材库</button>
     <button data-act="export" class="btn btn-ghost">导出清单</button>

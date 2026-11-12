@@ -32,6 +32,8 @@ r.get('/stats', requireUser, (req, res) => {
     downloadsByMe: one('SELECT COUNT(*) c FROM downloads WHERE user_id=?', req.user.id),
     members: one('SELECT COUNT(*) c FROM users WHERE active=1'),
     commentsTotal: one('SELECT COUNT(*) c FROM comments'),
+    scripts: one('SELECT COUNT(*) c FROM scripts'),
+    scriptsDone: one("SELECT COUNT(*) c FROM scripts WHERE status='done'"),
     rated: one('SELECT COUNT(*) c FROM videos WHERE rating > 0'),
     avgRating: db.prepare('SELECT ROUND(AVG(rating),1) v FROM videos WHERE rating > 0').get()?.v || 0,
     starred5: one('SELECT COUNT(*) c FROM videos WHERE rating = 5'),

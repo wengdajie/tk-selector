@@ -99,6 +99,27 @@ CREATE TABLE IF NOT EXISTS scan_files (
   video_id   TEXT,
   scanned_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS scripts (
+  id          TEXT PRIMARY KEY,
+  video_id    TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending',   -- pending | running | done | failed
+  model       TEXT,
+  error       TEXT,
+  title       TEXT NOT NULL DEFAULT '',
+  summary     TEXT NOT NULL DEFAULT '',
+  hook        TEXT NOT NULL DEFAULT '',
+  segments    TEXT NOT NULL DEFAULT '',          -- JSON [{t,shot,line}]
+  script_text TEXT NOT NULL DEFAULT '',          -- 完整口播稿
+  cta         TEXT NOT NULL DEFAULT '',
+  tags        TEXT NOT NULL DEFAULT '',
+  frames      TEXT NOT NULL DEFAULT '',          -- JSON [{t,path}]
+  raw         TEXT NOT NULL DEFAULT '',
+  created_by  TEXT,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scripts_video ON scripts(video_id, created_at DESC);
 `);
 
 // ---------- 轻量迁移 ----------

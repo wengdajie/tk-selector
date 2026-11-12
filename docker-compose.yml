@@ -1,7 +1,7 @@
 services:
   tk-selector:
     build: .
-    image: tk-selector:1.0
+    image: tk-selector:1.5
     container_name: tk-selector
     restart: unless-stopped
     ports:
@@ -17,6 +17,12 @@ services:
       ADMIN_NAME: 管理员
       # ACCESS_CODE: "改这里"  # 可选：设置后新增/删除成员需要口令
       MAX_UPLOAD_MB: "8192"
+      # ---- AI 脚本拆解（https://grsai.com/ 中转站，OpenAI 兼容）----
+      AI_ENABLED: "1"
+      AI_BASE_URL: https://api.grsai.com/v1
+      AI_API_KEY: ""          # ← 把 grsai 的 Key 填这里，留空则无法拆解
+      AI_MODEL: gpt-4o
+      AI_FRAMES: "6"
     volumes:
       - ./data:/data
       # 拍摄投递目录：群晖共享文件夹真实路径，只读挂载
