@@ -23,7 +23,7 @@ function extractJson(text) {
   return null;
 }
 
-async function postChat(body) {
+async function postChatOnce(body) {
   const ai = settings.getAi();
   const url = ai.baseUrl + '/chat/completions';
   const ctrl = new AbortController();
@@ -51,6 +51,26 @@ async function postChat(body) {
   }
 }
 
+/** 网络抖动 / 限流自动重试一次（超时和参数错误不重试，省额度） */
+async function postChat(body) {
+  let last;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await postChatOnce(body);
+    } catch (e) {
+      last = e;
+      if (e?.name === 'AbortError') {
+        throw new Error(`模型响应超时（${Math.round(settings.getAi().timeoutMs / 1000)} 秒），请稍后重试或调大超时`);
+      }
+      const retryable = e.status === 429 || (e.status >= 500 && e.status < 600) || e?.name === 'TypeError';
+      if (!retryable || attempt === 1) throw e;
+      console.warn(`[ai] 调用失败（${e.message.slice(0, 80)}），2 秒后重试一次`);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  throw last;
+}
+
 /**
  * 多模态对话，返回 { text, json, usage, model }
  * @param {{system?:string, prompt:string, images?:string[], json?:boolean}} opts
@@ -72,7 +92,7 @@ async function chat({ system, prompt, images = [], json = true }) {
     model: ai.model,
     messages,
     temperature: 0.4,
-    max_tokens: 2400,
+    max_tokens: 4000,   // 长脚本（分镜 + 复刻提示词）留足余量，截断会导致 JSON 解析失败
   };
 
   let data;

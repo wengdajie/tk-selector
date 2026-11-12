@@ -27,13 +27,14 @@ function grabFrame(file, atSec, outAbs, timeout = 30_000) {
   });
 }
 
-/** 抽 N 帧（避开首尾），返回 [{t, sec, abs, path}] */
-async function extractFrames(video, count) {
+/** 抽 N 帧（避开首尾），返回 [{t, sec, abs, path}]
+ *  dirKey：帧目录名，默认视频 id；runJob 传 's-' + 脚本 id（避免多条脚本互相覆盖帧） */
+async function extractFrames(video, count, dirKey = video.id) {
   const abs = path.join(config.mediaDir, video.file_path);
   if (!fs.existsSync(abs)) throw new Error('源文件不存在，可能已被移动或删除');
 
   const dur = Number(video.duration) || 0;
-  const dirRel = path.join('frames', video.id);
+  const dirRel = path.join('frames', dirKey);
   const dirAbs = path.join(config.mediaDir, dirRel);
   await fs.promises.mkdir(dirAbs, { recursive: true });
 
@@ -165,6 +166,26 @@ const updFail = db.prepare("UPDATE scripts SET status='failed', error=?, updated
 const updRunning = db.prepare("UPDATE scripts SET status='running', updated_at=? WHERE id=?");
 
 let active = 0;
+const MAX_ACTIVE = 2;          // 同时最多几个模型调用
+const SLOT_WAIT_MS = 1200;     // 占不到坑时隔多久再看一眼
+const SLOT_MAX_WAIT = 250;     // 最多排多久（约 5 分钟），防止永久挂起
+
+/** 真排队：占不到坑持续等待（旧实现只 sleep 一次，批量会把并发打爆） */
+async function waitSlot() {
+  for (let i = 0; i < SLOT_MAX_WAIT && active >= MAX_ACTIVE; i++) {
+    await new Promise(r => setTimeout(r, SLOT_WAIT_MS));
+  }
+}
+
+/** 服务重启恢复：重启时还在 pending/running 的任务已经没有进程在跑，
+ *  不处理就会永远卡住（前端一直轮询「拆解中」）。统一标成失败，让用户点重试。 */
+function recoverStale() {
+  const r = db.prepare(
+    "UPDATE scripts SET status='failed', error='服务重启，任务被中断，请点「重新拆解」' WHERE status IN ('pending','running')"
+  ).run();
+  if (r.changes) console.log(`[script] 恢复：${r.changes} 个中断任务已标记为失败`);
+  return r.changes;
+}
 
 /** 创建一个拆解任务（同一素材已有任务则复用，避免重复烧钱） */
 function createJob(video, userId) {
@@ -182,14 +203,14 @@ function createJob(video, userId) {
 }
 
 async function runJob(id, video) {
-  if (active >= 2) {
-    // 简单排队：等前面跑完再起
-    await new Promise(r => setTimeout(r, 1500));
-  }
+  await waitSlot();
+  // 排队期间任务可能已被删除
+  if (!db.prepare('SELECT 1 FROM scripts WHERE id = ?').get(id)) return null;
   active++;
   updRunning.run(Date.now(), id);
   try {
-    const frames = await extractFrames(video, settings.getAi().frames);
+    // 帧目录用脚本自己的 id：两条脚本（原拆 + 重拆）共用视频 id 目录会互相覆盖
+    const frames = await extractFrames(video, settings.getAi().frames, 's-' + id);
     db.prepare('UPDATE scripts SET frames = ? WHERE id = ?')
       .run(JSON.stringify(frames.map(f => ({ t: f.sec, path: f.path }))), id);
 
@@ -215,10 +236,12 @@ async function runJob(id, video) {
   }
 }
 
-/** 重新跑一个已有任务（失败重试 / 换模型重拆） */
+/** 重新跑一个已有任务（失败重试 / 换模型重拆）。
+ *  已在进行中的直接复用，防止连点两次触发并发调用、重复烧钱。 */
 function restart(scriptId) {
   const row = db.prepare('SELECT * FROM scripts WHERE id = ?').get(scriptId);
   if (!row) return null;
+  if (row.status === 'pending' || row.status === 'running') return row;
   const v = db.prepare('SELECT * FROM videos WHERE id = ?').get(row.video_id);
   if (!v) return null;
   db.prepare("UPDATE scripts SET status='running', error='', updated_at=? WHERE id=?").run(Date.now(), row.id);
@@ -226,5 +249,5 @@ function restart(scriptId) {
   return db.prepare('SELECT * FROM scripts WHERE id = ?').get(row.id);
 }
 
-module.exports = { createJob, restart, extractFrames };
+module.exports = { createJob, restart, recoverStale, extractFrames };
 

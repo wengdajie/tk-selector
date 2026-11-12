@@ -55,6 +55,9 @@ app.use('/api', require('./routes/dashboard'));
 app.use('/api', require('./routes/scripts'));
 app.use('/api', require('./routes/settings'));
 
+// 服务重启时把卡在 pending/running 的拆解任务标记为失败（否则永远「拆解中」）
+require('./lib/scriptgen').recoverStale();
+
 // 手动触发目录扫描
 app.post('/api/scan', requireUser, async (req, res) => {
   const result = await scanner.scanNow({ reason: `manual:${req.user.name}`, uploaderId: null });

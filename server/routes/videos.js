@@ -251,6 +251,22 @@ r.delete('/videos/:id', requireUser, (req, res) => {
   if (req.user.role !== 'admin' && v.uploader_id !== req.user.id) {
     return res.status(403).json({ error: '只有上传者或管理员可以删除' });
   }
+  // 级联：素材没了，挂在它名下的脚本（含脚本专属关键帧目录）一起清掉，避免孤儿数据与磁盘泄漏
+  const scripts = db.prepare('SELECT id, frames FROM scripts WHERE video_id = ?').all(v.id);
+  db.prepare('DELETE FROM scripts WHERE video_id = ?').run(v.id);
+  const frameDirs = new Set();
+  for (const s of scripts) {
+    try {
+      for (const f of s.frames ? JSON.parse(s.frames) : []) {
+        const d = String(f?.path || '').split('/')[1];
+        if (d && d.startsWith('s-')) frameDirs.add(d);
+      }
+    } catch { /* 帧字段损坏就跳过 */ }
+  }
+  for (const d of frameDirs) {
+    try { fs.rmSync(path.join(config.mediaDir, 'frames', d), { recursive: true, force: true }); }
+    catch { /* ignore */ }
+  }
   db.prepare('DELETE FROM videos WHERE id = ?').run(v.id);
   for (const rel of [v.file_path, v.thumb_path].filter(Boolean)) {
     try { fs.unlinkSync(path.join(config.mediaDir, rel)); } catch { /* ignore */ }

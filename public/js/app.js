@@ -1180,7 +1180,7 @@ function renderScriptBar() {
   for (const [k, label, n] of items) {
     seg.append(el('button', {
       class: S.scriptFilter === k ? 'on' : '',
-      onclick: () => { S.scriptFilter = k; renderToolbar(); loadScripts(); },
+      onclick: () => { S.scriptFilter = k; loadScripts(); },   // loadScripts 内部会刷新工具栏
     }, n ? `${label} ${n}` : label));
   }
   bar.append(seg, el('div', { class: 'spacer' }));
@@ -1192,18 +1192,23 @@ function renderScriptBar() {
   return bar;
 }
 
+let scriptSeq = 0;   // 请求序号：快速切筛选时丢弃过期响应，避免旧数据覆盖新数据
+
 async function loadScripts() {
   if (!S.scripts.length) $('#view').replaceChildren(skeleton(4));
+  const seq = ++scriptSeq;
   try {
     const p = new URLSearchParams();
     if (S.q) p.set('q', S.q);
     if (S.scriptFilter !== 'all') p.set('status', S.scriptFilter);
     const data = await api('/scripts?' + p);
+    if (seq !== scriptSeq || S.view !== 'scripts') return;   // 已有更新的请求 / 已切走
     S.scripts = data.items || [];
     S.scriptCounts = data.counts || {};
     renderToolbar();
     renderScripts();
   } catch (e) {
+    if (seq !== scriptSeq) return;
     $('#view').replaceChildren(emptyState({ icon: '!', title: '脚本库加载失败', message: e.message }));
   }
 }
@@ -1351,8 +1356,8 @@ function downloadScript(s) {
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
 }
 
-/** 详情内容（按状态分三种形态） */
-function scriptDetail(s, actions) {
+/** 详情内容（按状态分三种形态；stale = 轮询超时后的提示） */
+function scriptDetail(s, actions, stale = false) {
   if (s.status === 'pending' || s.status === 'running') {
     return [
       el('div', { class: 'sprog' },
@@ -1363,7 +1368,9 @@ function scriptDetail(s, actions) {
         ),
       ),
       frameStrip(s),
-      el('p', { class: 'snote' }, '关掉这个窗口也没关系，任务在服务端继续跑，完成后到「脚本库」看结果。'),
+      el('p', { class: 'snote' }, stale
+        ? '等了 5 分钟还没完成（批量拆解时前面还排着队）。这里不再自动刷新，稍后到「脚本库」看结果。'
+        : '关掉这个窗口也没关系，任务在服务端继续跑，完成后到「脚本库」看结果。'),
     ].filter(Boolean);
   }
 
@@ -1549,21 +1556,25 @@ function openScript(id) {
     },
   };
 
-  function paint(s) {
+  function paint(s, stale = false) {
     current = s;
     const h = m.card.querySelector('.modal-head h3');
     if (h) h.textContent = s.title || '脚本详情';
-    body.replaceChildren(...scriptDetail(s, actions));
+    body.replaceChildren(...scriptDetail(s, actions, stale));
   }
 
+  let polls = 0;
   async function poll() {
     clearTimeout(timer);
     if (stopped) return;
     try {
       const { script } = await api('/scripts/' + id);
       if (stopped) return;
-      paint(script);
+      const overdue = polls >= 120;   // ~5 分钟上限：任务卡死时不再无限轮询
+      paint(script, overdue);
       if (script.status === 'pending' || script.status === 'running') {
+        if (overdue) return;
+        polls++;
         timer = setTimeout(poll, 2600);
       } else {
         refreshStats();
@@ -2064,18 +2075,19 @@ async function openVideo(id) {
 
   let data;
   try {
-    data = await api('/videos/' + id);
+    // 素材详情和已有脚本并行拉，抽屉不用多等一拍；脚本接口失败不影响打开
+    const [d, sr] = await Promise.all([
+      api('/videos/' + id),
+      api('/scripts?videoId=' + id).catch(() => ({ items: [] })),
+    ]);
+    data = d;
+    data.scripts = sr.items || [];
   } catch (e) {
     root.innerHTML = '';
     root.append(el('div', { class: 'drawer-mask', onclick: closeDrawer }),
       el('div', { class: 'drawer-panel' }, emptyState({ icon: '!', title: '打开失败', message: e.message })));
     return;
   }
-  // 已有脚本（没有也不影响打开抽屉）
-  try {
-    const r = await api('/scripts?videoId=' + id);
-    data.scripts = r.items || [];
-  } catch { data.scripts = []; }
   renderDrawer(data);
 }
 

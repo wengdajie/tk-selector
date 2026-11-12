@@ -27,6 +27,23 @@ function shape(row) {
   };
 }
 
+/** LIKE 通配符转义：用户输入 % 或 _ 不应变成「匹配全部」 */
+const likeEsc = s => String(s).replace(/[\\%_]/g, m => '\\' + m);
+
+/** 删掉一条脚本名下的关键帧目录（磁盘不泄漏）。老数据目录按视频 id 共享，只清脚本专属的 s- 目录 */
+function cleanFrames(row) {
+  const frames = parse(row.frames, []);
+  const dirs = new Set(
+    frames
+      .map(f => String(f?.path || '').split('/')[1])
+      .filter(d => d && d.startsWith('s-'))
+  );
+  for (const d of dirs) {
+    try { fs.rmSync(path.join(config.mediaDir, 'frames', d), { recursive: true, force: true }); }
+    catch { /* 清理失败不影响删除本身 */ }
+  }
+}
+
 /** AI 配置自检（不消耗 token） */
 r.get('/ai/status', requireUser, async (req, res) => {
   res.json(await ai.status());
@@ -55,7 +72,10 @@ r.get('/scripts', requireUser, (req, res) => {
     where.push('s.status = @status');
     p.status = req.query.status;
   }
-  if (req.query.q) { where.push('(s.title LIKE @q OR s.summary LIKE @q OR s.tags LIKE @q OR s.script_text LIKE @q)'); p.q = `%${req.query.q}%`; }
+  if (req.query.q) {
+    where.push("(s.title LIKE @q ESCAPE '\\' OR s.summary LIKE @q ESCAPE '\\' OR s.tags LIKE @q ESCAPE '\\' OR s.script_text LIKE @q ESCAPE '\\')");
+    p.q = `%${likeEsc(req.query.q)}%`;
+  }
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
   const items = db.prepare(`
@@ -86,13 +106,13 @@ r.get('/scripts/:id', requireUser, (req, res) => {
   res.json({ script: shape(row) });
 });
 
-/** 关键帧图片（缩略图级别，用于列表与详情） */
-r.get('/scripts/:id/frames/:idx', (req, res) => {
+/** 关键帧图片（与视频流一致：带 uid 校验身份） */
+r.get('/scripts/:id/frames/:idx', requireUser, (req, res) => {
   const row = db.prepare('SELECT frames FROM scripts WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).end();
   const frames = parse(row.frames, []);
   const f = frames[Number(req.params.idx)];
-  if (!f?.path) return res.status(404).end();
+  if (!f?.path || String(f.path).includes('..')) return res.status(404).end();
   const abs = path.join(config.mediaDir, f.path);
   if (!fs.existsSync(abs)) return res.status(410).end();
   res.setHeader('Cache-Control', 'public, max-age=86400');
@@ -114,6 +134,7 @@ r.delete('/scripts/:id', requireUser, (req, res) => {
   const row = db.prepare('SELECT * FROM scripts WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: '脚本不存在' });
   db.prepare('DELETE FROM scripts WHERE id = ?').run(row.id);
+  cleanFrames(row);
   res.json({ ok: true });
 });
 

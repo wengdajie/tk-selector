@@ -8,8 +8,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
+const require = createRequire(import.meta.url);
+const Database = require('better-sqlite3');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tk-script-'));
 const PORT = 8199;
@@ -146,22 +149,29 @@ const env = {
 fs.mkdirSync(path.join(tmp, 'data'), { recursive: true });
 fs.mkdirSync(path.join(tmp, 'watch'), { recursive: true });
 
-const srv = spawn(process.execPath, ['server/index.js'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+let srv = null;
 let log = '';
-srv.stdout.on('data', d => { log += d; });
-srv.stderr.on('data', d => { log += d; });
+const spawnServer = () => {
+  const s = spawn(process.execPath, ['server/index.js'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  s.stdout.on('data', d => { log += d; });
+  s.stderr.on('data', d => { log += d; });
+  return s;
+};
+const stop = () => { try { srv?.kill(); } catch { /* ignore */ } mock.close(); };
 
-const stop = () => { try { srv.kill(); } catch { /* ignore */ } mock.close(); };
+const waitReady = async (cycles = 80) => {
+  for (let i = 0; i < cycles; i++) {
+    try {
+      const r = await fetch(BASE + '/api/version');
+      if (r.ok) return true;
+    } catch { /* 还没起来 */ }
+    await sleep(300);
+  }
+  return false;
+};
 
-let ready = false;
-for (let i = 0; i < 80; i++) {
-  try {
-    const r = await fetch(BASE + '/api/version');
-    if (r.ok) { ready = true; break; }
-  } catch { /* 还没起来 */ }
-  await sleep(300);
-}
-if (!ready) {
+srv = spawnServer();
+if (!await waitReady()) {
   console.log('服务没起来：\n' + log.slice(-2000));
   stop();
   process.exit(1);
@@ -344,6 +354,94 @@ await call('/settings/ai', { method: 'PUT', uid, body: { ai_api_key: 'sk-mock-ke
 // 无 uid 的受保护接口
 const noAuth = await call('/scripts');
 ok(noAuth.status === 401, '未登录访问脚本列表被拒', String(noAuth.status));
+
+// ---- v1.6.1：自审修复 ----
+console.log('\n== v1.6.1 自审修复 ==');
+
+// 1) LIKE 通配符转义：用户搜 % 或 _ 不应变成「匹配全部」
+const pct = await call('/scripts?q=' + encodeURIComponent('%'), { uid });
+ok(pct.data.items?.length === 0, '搜索 % 不再命中全部（LIKE 已转义）', String(pct.data.items?.length));
+const und = await call('/scripts?q=' + encodeURIComponent('_'), { uid });
+ok(und.data.items?.length === 0, '搜索 _ 不再命中全部');
+
+// 2) 关键帧接口要登录，且路径不许越界
+const frameNoAuth = await fetch(`${BASE}/api/scripts/${sid2}/frames/0`);
+ok(frameNoAuth.status === 401, '未登录访问关键帧被拒', String(frameNoAuth.status));
+const wdb = new Database(path.join(env.DATA_DIR, 'app.db'));
+const origFrames = wdb.prepare('SELECT frames FROM scripts WHERE id = ?').get(sid2).frames;
+wdb.prepare('UPDATE scripts SET frames = ? WHERE id = ?')
+  .run(JSON.stringify([{ t: 1, path: 'frames/../../server/db.js' }]), sid2);
+const trav = await fetch(`${BASE}/api/scripts/${sid2}/frames/0?uid=${uid}`);
+ok(trav.status === 404, '关键帧路径含 .. 时拒绝返回文件', String(trav.status));
+wdb.prepare('UPDATE scripts SET frames = ? WHERE id = ?').run(origFrames, sid2);
+
+// 3) 帧目录按脚本隔离（s- 前缀，多条脚本/重拆不互相覆盖）
+ok((detail2?.frames || []).every(f => /^frames\/s-[^/]+\/\d+\.jpg$/.test(f.path)),
+  '关键帧存进脚本专属目录（s- 前缀）', JSON.stringify((detail2?.frames || []).map(f => f.path)));
+const frameRoot = path.join(env.DATA_DIR, 'media', 'frames');
+ok(fs.existsSync(path.join(frameRoot, 's-' + sid2)), '专属帧目录真实存在');
+
+// 4) 防抖：进行中的任务重复触发/重试都复用同一条，不再并发烧钱
+wdb.prepare("UPDATE scripts SET status='running', error='' WHERE id = ?").run(sid2);
+wdb.close();
+const seenBefore = seen.length;
+const rRetry = await call(`/scripts/${sid2}/retry`, { method: 'POST', uid });
+ok(rRetry.status === 200 && rRetry.data.job?.status === 'running',
+  '进行中重试直接复用（不并发重跑）', `${rRetry.status}/${rRetry.data.job?.status}`);
+const rAgain = await call(`/videos/${vid}/analyze`, { method: 'POST', uid });
+ok(rAgain.data.script?.id === sid2, '进行中重复触发也复用同一条任务');
+await sleep(500);
+ok(seen.length === seenBefore, '防抖期间模型调用数不增加', `${seenBefore} → ${seen.length}`);
+
+// 5) 服务重启恢复：卡住的任务标 failed（可重试），而不是永远「拆解中」
+srv.kill();
+await Promise.race([new Promise(r => srv.once('exit', r)), sleep(5000)]);
+await sleep(800);   // 等端口释放
+srv = spawnServer();
+if (!await waitReady()) {
+  console.log('服务重启失败：\n' + log.slice(-2000));
+  stop();
+  process.exit(1);
+}
+const stale = await call('/scripts/' + sid2, { uid });
+ok(stale.data.script?.status === 'failed' && /服务重启/.test(stale.data.script?.error || ''),
+  '重启后中断任务标为失败并提示重试', `${stale.data.script?.status}: ${stale.data.script?.error}`);
+const rr = await call(`/scripts/${sid2}/retry`, { method: 'POST', uid });
+ok(rr.status === 200, '重启后可以重新拆解', String(rr.status));
+let redo2 = null;
+for (let i = 0; i < 60; i++) {
+  await sleep(1000);
+  const x = await call('/scripts/' + sid2, { uid });
+  redo2 = x.data.script;
+  if (redo2 && (redo2.status === 'done' || redo2.status === 'failed')) break;
+}
+ok(redo2?.status === 'done', '重试后拆解完成', redo2?.error || redo2?.status || 'timeout');
+ok(seen.length === seenBefore + 1, '重试恰好多调一次模型', String(seen.length));
+
+// 6) 删脚本清掉自己的关键帧目录（磁盘不泄漏）
+ok(fs.existsSync(path.join(frameRoot, 's-' + sid2)), '删除前帧目录存在');
+const delS = await call('/scripts/' + sid2, { method: 'DELETE', uid });
+ok(delS.status === 200, '删除脚本');
+ok(!fs.existsSync(path.join(frameRoot, 's-' + sid2)), '删脚本同时清掉专属帧目录');
+
+// 7) 删素材级联：脚本 + 帧目录一起清，不留孤儿
+const an3 = await call(`/videos/${vid}/analyze`, { method: 'POST', uid });
+const sid3 = an3.data.script?.id;
+ok(!!sid3 && sid3 !== sid2, '删脚本后再拆解会新建任务');
+let detail3 = null;
+for (let i = 0; i < 60; i++) {
+  await sleep(1000);
+  const x = await call('/scripts/' + sid3, { uid });
+  detail3 = x.data.script;
+  if (detail3 && (detail3.status === 'done' || detail3.status === 'failed')) break;
+}
+ok(detail3?.status === 'done', '新任务拆解完成', detail3?.error || '');
+ok(fs.existsSync(path.join(frameRoot, 's-' + sid3)), '新任务帧目录存在');
+const delV = await call('/videos/' + vid, { method: 'DELETE', uid });
+ok(delV.status === 200, '删除素材');
+const left = await call('/scripts?videoId=' + vid, { uid });
+ok(left.data.items?.length === 0, '素材删除后脚本级联清空');
+ok(!fs.existsSync(path.join(frameRoot, 's-' + sid3)), '级联清理关键帧目录');
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 if (fail) console.log('\n服务端日志片段：\n' + log.slice(-1500));
