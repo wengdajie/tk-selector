@@ -269,6 +269,13 @@ AI 接入走 OpenAI 兼容协议，默认指向 [grsai.com](https://grsai.com/) 
 - **@成员真实艾特**：评论里 `@名字`，群消息会按平台语法真实艾特对应成员——企业微信用 `<@userid>`、飞书用 `<at user_id>`、钉钉按手机号（`atMobiles`）。需要先在「成员」页给成员配好**通知账号**（企业微信 userid / 钉钉手机号 / 飞书 user_id）；没配的成员只会以文字出现在消息里
 - **安全**：钉钉 / 飞书机器人开了「加签」的，在设置里填加签密钥即可（自动按平台算法签名）；webhook 推送失败只记日志，绝不影响上传和评论本身
 - **缩略图卡片（钉钉）**：填好「公网访问地址」后，钉钉的素材入库通知会变成 **feedCard 卡片**——每条素材一张卡，显示封面图缩略图 + 标题 + 时长，点卡片直达视频；最多 8 条。企业微信则把封面图直接内嵌到 markdown 里；飞书 text 机器人不支持图片，仍是文字列表
+- **免费拿到公网地址（Cloudflare 快速隧道）**：不用域名、不用注册，群晖上一条命令即可：
+  ```bash
+  docker run -d --name tk-tunnel --restart unless-stopped --network host \
+    cloudflare/cloudflared:latest tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8899
+  docker logs tk-tunnel 2>&1 | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' | head -1
+  ```
+  把打印出来的 `https://xxx.trycloudflare.com` 填进「公网访问地址」即可。快速隧道的域名在容器重启后会变，仓库里 `deploy/update-public-base.sh` 会从隧道日志里取最新地址并自动写回设置（可挂到群晖「任务计划」里开机跑一次）。
 - **公网地址怎么填**：钉钉 / 企微客户端要自己从公网拉图，NAS 内网地址（192.168.x.x）它们打不开。所以需要给工作台一个公网可达的地址：DDNS 域名、反向代理（Nginx / 群晖反代）、内网穿透（frp / cloudflared）任一种都行，填到「公网访问地址」即可。不填 = 只发文字列表（旧行为），不影响推送本身
 - 环境变量 `NOTIFY_*` 是出厂默认，界面保存过的项优先
 
