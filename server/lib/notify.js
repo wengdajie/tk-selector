@@ -112,9 +112,9 @@ async function send(text, mentions = []) {
 async function sendRaw(cfg, text, mentions) {
   let url = cfg.url;
   if (cfg.type === 'dingtalk' && cfg.secret) {
-    // 钉钉加签：以密钥为 key 对时间戳做 HMAC-SHA256，拼到 URL 上
+    // 钉钉官方算法：key=密钥，消息体 = `时间戳\n密钥`（注意不是只签时间戳！）
     const ts = Date.now();
-    const sign = encodeURIComponent(crypto.createHmac('sha256', cfg.secret).update(String(ts)).digest('base64'));
+    const sign = encodeURIComponent(crypto.createHmac('sha256', cfg.secret).update(`${ts}\n${cfg.secret}`).digest('base64'));
     url += (url.includes('?') ? '&' : '?') + `timestamp=${ts}&sign=${sign}`;
   }
   const payload = buildPayload(cfg.type, text, mentions);

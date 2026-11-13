@@ -1,7 +1,7 @@
 services:
   tk-selector:
     build: .
-    image: tk-selector:1.7.2
+    image: tk-selector:1.7.3
     container_name: tk-selector
     restart: unless-stopped
     ports:

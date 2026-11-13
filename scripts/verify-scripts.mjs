@@ -7,6 +7,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -563,7 +564,24 @@ const ding = hooks[5]?.body || {};
 ok(ding.msgtype === 'markdown' && Array.isArray(ding.at?.atMobiles), '钉钉是 markdown + atMobiles', JSON.stringify(ding).slice(0, 120));
 ok((ding.at?.atMobiles || []).includes('13800138000'), '钉钉按手机号艾特');
 ok(String(ding.markdown?.text || '').includes('@13800138000'), '钉钉正文含手机号艾特');
-ok(String(hooks[5]?.url || '').includes('timestamp=') && String(hooks[5]?.url || '').includes('sign='), '钉钉加签拼在 URL 上', hooks[5]?.url);
+const dingUrl = String(hooks[5]?.url || '');
+ok(dingUrl.includes('timestamp=') && dingUrl.includes('sign='), '钉钉加签拼在 URL 上', dingUrl);
+// 按钉钉官方公式逐字节比对：key=密钥，消息体 = `时间戳\n密钥`
+{
+  const dingSecret = 'fei-secret';   // 上面 PUT 只切了类型，密钥沿用
+  const ts = new URLSearchParams(dingUrl.split('?')[1]).get('timestamp');
+  const got = new URLSearchParams(dingUrl.split('?')[1]).get('sign');
+  const want = crypto.createHmac('sha256', dingSecret)
+    .update(`${ts}\n${dingSecret}`).digest('base64');
+  ok(got === want, '钉钉加签符合官方算法（ts\\nsecret 为消息体）', `got=${got} want=${want}`);
+  // 同时证明旧错误算法（只签时间戳）算不出这个值，防止回归到错误实现
+  const wrong = encodeURIComponent(crypto.createHmac('sha256', dingSecret)
+    .update(String(ts)).digest('base64'));
+  ok(got !== wrong, '钉钉加签不是「只签时间戳」的错误实现');
+}
+// 飞书官方公式：key = `时间戳\n密钥`，消息体为空
+ok(fei.sign === crypto.createHmac('sha256', `${fei.timestamp}\nfei-secret`).update('').digest('base64'),
+  '飞书加签符合官方算法（ts\\nsecret 为 key）');
 
 // 关掉评论事件 → 不再推送
 await call('/settings/notify', { method: 'PUT', uid, body: { notify_on_comment: false } });

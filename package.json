@@ -1,6 +1,6 @@
 {
   "name": "tk-selector",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "private": true,
   "description": "TK 产品视频选片工作台 - 每日选片 / 素材库 / 视频需求 / AI 脚本拆解",
   "main": "server/index.js",
