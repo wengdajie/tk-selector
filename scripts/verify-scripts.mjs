@@ -98,6 +98,7 @@ const MOCK = {
 };
 const seen = [];
 const mock = http.createServer((req, res) => {
+  if (req.url === '/__probe') { res.writeHead(200); return res.end('ok'); }   // 端口探测，不计入状态
   let buf = '';
   req.on('data', c => { buf += c; });
   req.on('end', () => {
@@ -121,7 +122,29 @@ const mock = http.createServer((req, res) => {
     }));
   });
 });
-await new Promise(r => mock.listen(0, '127.0.0.1', r));
+/** 绑一个可用的本地端口：本机偶有安全软件拦特定端口（实测 10080 会 fetch failed），自检不通就换 */
+async function listenSafe(server) {
+  for (let i = 0; i < 8; i++) {
+    await new Promise(r => {
+      server.once('error', r);
+      server.listen(0, '127.0.0.1', r);
+    });
+    server.removeAllListeners('error');
+    const port = server.address()?.port;
+    if (!port) continue;
+    try {
+      await fetch(`http://127.0.0.1:${port}/__probe`, { signal: AbortSignal.timeout(1500) });
+      return port;
+    } catch {
+      await new Promise(r => server.close(r));
+      await sleep(30);
+    }
+  }
+  fail('找不到可用的本地端口（被安全软件拦截？）');
+  return null;
+}
+
+await listenSafe(mock);
 const aiPort = mock.address().port;
 console.log(`假中转站 127.0.0.1:${aiPort}\n`);
 
@@ -450,6 +473,7 @@ ok(!fs.existsSync(path.join(frameRoot, 's-' + sid3)), '级联清理关键帧目�
 console.log('\n== v1.7.0 群通知 ==');
 const hooks = [];
 const hookSrv = http.createServer((req, res) => {
+  if (req.url === '/__probe') { res.writeHead(200); return res.end('ok'); }   // 端口探测，不计入状态
   let buf = '';
   req.on('data', c => { buf += c; });
   req.on('end', () => {
@@ -460,7 +484,7 @@ const hookSrv = http.createServer((req, res) => {
     res.end('{"errcode":0}');
   });
 });
-await new Promise(r => hookSrv.listen(0, '127.0.0.1', r));
+await listenSafe(hookSrv);
 extraClosers.push(() => hookSrv.close());
 const hookPort = hookSrv.address().port;
 const hookUrl = `http://127.0.0.1:${hookPort}/hook`;
@@ -607,6 +631,7 @@ ok(String(deepOk.data.modelEcho || '').includes('mock'), '深度测试返回模�
 
 // 「不开放 /models」的厂商（火山方舟等 404）：浅探仍算连通，模型靠真实调用验证
 const mock2 = http.createServer((req, res) => {
+  if (req.url === '/__probe') { res.writeHead(200); return res.end('ok'); }   // 端口探测
   let buf = '';
   req.on('data', c => { buf += c; });
   req.on('end', () => {
@@ -618,7 +643,7 @@ const mock2 = http.createServer((req, res) => {
     res.end(JSON.stringify({ model: 'mock2-vision', choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
   });
 });
-await new Promise(r => mock2.listen(0, '127.0.0.1', r));
+await listenSafe(mock2);
 extraClosers.push(() => mock2.close());
 const m2port = mock2.address().port;
 
@@ -649,6 +674,29 @@ for (const navEl of ['nav', 'navMain', 'navAdmin', 'mobileNav']) {
 }
 ok(html.includes('data-view="settings"'), 'index.html 有系统设置入口');
 ok(appjs.includes("view === 'settings'"), 'app.js 支持设置视图切换');
+
+/* ---------------- v1.8.0 下载记录权限 + TikTok 竖滑播放器 ---------------- */
+console.log('\n== v1.8.0 记录权限收口 ==');
+const opList = await call('/downloads', { uid: opUid });
+ok(opList.status === 403, '非管理员查下载记录 → 403', String(opList.status) + (opList.data?.error || ''));
+const admList = await call('/downloads', { uid });
+ok(admList.status === 200 && Array.isArray(admList.data?.items), '管理员可查下载记录', String(admList.status));
+const opPost = await call('/downloads', { method: 'POST', uid: opUid, body: { ids: [] } });
+ok(opPost.status === 400, '非管理员下载动作本身不受限（空 ids 校验 400 而非 403）', String(opPost.status));
+
+console.log('\n== v1.8.0 竖滑播放器（静态结构） ==');
+ok(fs.existsSync(path.join(root, 'public', 'js', 'feed.js')), 'feed.js 存在');
+ok(appjs.includes("from './feed.js'"), 'app.js 引入 feed 模块');
+const feedjs = fs.readFileSync(path.join(root, 'public', 'js', 'feed.js'), 'utf8');
+ok(feedjs.includes('export function openFeed'), 'feed 导出 openFeed');
+ok(feedjs.includes('feed-mask-chk') && feedjs.includes('MASK_KEY'), '遮罩勾选可记忆');
+ok(feedjs.includes('feed-rail') && feedjs.includes('feed-info'), '遮罩含功能列与文案区');
+ok(feedjs.includes('touchend') && feedjs.includes('wheel'), '支持滑动/滚轮切换');
+ok(feedjs.includes("PATCH"), '收藏(星标)走 PATCH 真实接口');
+const cssAll = fs.readFileSync(path.join(root, 'public', 'css', 'app.css'), 'utf8');
+ok(cssAll.includes('.feed-root') && cssAll.includes('.feed-rail'), 'feed 样式已就位');
+ok(appjs.includes("view === 'records'"), 'app.js 记录视图有非管理员守卫');
+ok(appjs.includes('openFeed(S.items') && appjs.includes('isMobileLike'), '手机端点卡片进竖滑模式');
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 if (fail) console.log('\n服务端日志片段：\n' + log.slice(-1500));

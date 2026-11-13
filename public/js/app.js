@@ -5,6 +5,10 @@ import {
   roleLabel, animateNumber, delta, shortDate, weekdayOf,
 } from './util.js';
 import { videoCard, videoRow, requestCard, downloadBatch, statCard, icon, starIcon, QC_LABELS, qcFlags } from './render.js';
+import { openFeed } from './feed.js';
+
+/** 手机端（触屏或窄屏）：点素材卡片直接进 TikTok 式竖滑播放器 */
+const isMobileLike = () => matchMedia('(pointer: coarse)').matches || innerWidth < 768;
 
 /* ========================= 主题 ========================= */
 const THEME_KEY = 'tk.theme';
@@ -279,11 +283,16 @@ function enterApp(user, view = 'dashboard') {
   switchView(view === 'settings' && user.role !== 'admin' ? 'dashboard' : view, true);
 }
 
-/** 管理员专属入口（系统设置）按角色显隐 */
+/** 管理员专属入口（系统设置 / 下载记录）按角色显隐 */
 function applyRoleUi() {
   const isAdmin = S.user?.role === 'admin';
   const group = document.getElementById('adminNav');
   if (group) group.hidden = !isAdmin;
+  // 下载记录：非管理员隐藏入口（侧边栏 + 底部移动导航）
+  for (const recBtn of document.querySelectorAll('button[data-view="records"]')) {
+    if (recBtn.closest('#mobileNav')) recBtn.hidden = !isAdmin;
+    else recBtn.style.display = isAdmin ? '' : 'none';
+  }
   const m = document.querySelector('#mobileNav [data-view="settings"]');
   if (m) m.hidden = !isAdmin;
   const mnav = document.getElementById('mobileNav');
@@ -370,6 +379,10 @@ function switchView(view, force = false) {
   if (S.view === view && !force) return;
   if (view === 'settings' && S.user?.role !== 'admin') {
     toast('系统设置只有管理员能看', 'err');
+    view = 'dashboard';
+  }
+  if (view === 'records' && S.user?.role !== 'admin') {
+    toast('下载记录只有管理员能看', 'err');
     view = 'dashboard';
   }
   S.view = view;
@@ -1924,7 +1937,7 @@ function renderList() {
     const props = {
       selected: S.selected.has(v.id),
       onToggle: () => toggleSelect(v.id),
-      onOpen: () => openVideo(v.id),
+      onOpen: () => { isMobileLike() ? openFeed(S.items, v.id) : openVideo(v.id); },
       onRate: (video, rating) => rateVideo(video, rating),
     };
     wrap.append(S.layout === 'grid' ? videoCard(v, props) : videoRow(v, props));
@@ -2462,6 +2475,12 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
       el('span', {}, v.uploader_name || '目录投递'),
       el('span', { style: { opacity: .4 } }, '·'),
       el('span', {}, `入库 ${timeAgo(v.created_at)}`),
+      el('span', { style: { opacity: .4 } }, '·'),
+      el('button', {
+        class: 'btn btn-ghost sm',
+        title: 'TikTok 式竖滑播放 + 可勾选原生界面遮罩',
+        onclick: () => openFeed(S.items?.length ? S.items : [v], v.id),
+      }, '▶ 竖滑模式'),
     ),
     v.orig_name && v.orig_name !== v.title
       ? el('div', { style: { fontSize: '10.5px', color: 'var(--tx3)', marginTop: '8px', wordBreak: 'break-all' } }, `原文件名：${v.orig_name}`)

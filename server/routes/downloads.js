@@ -5,7 +5,7 @@ const path = require('path');
 const archiver = require('archiver');
 const db = require('../db');
 const config = require('../config');
-const { requireUser } = require('../middleware');
+const { requireUser, requireAdmin } = require('../middleware');
 const { uuid, ymd } = require('../lib/util');
 
 const r = express.Router();
@@ -91,7 +91,7 @@ r.get('/downloads/:batchId/file', requireUser, (req, res) => {
   archive.finalize();
 });
 
-r.get('/downloads', requireUser, (req, res) => {
+r.get('/downloads', requireUser, requireAdmin, (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 80, 1), 300);
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   const where = [];
@@ -115,7 +115,7 @@ r.get('/downloads', requireUser, (req, res) => {
   res.json({ items: rows, total, limit, offset });
 });
 
-r.get('/downloads/:batchId', requireUser, (req, res) => {
+r.get('/downloads/:batchId', requireUser, requireAdmin, (req, res) => {
   const rows = db.prepare(`
     SELECT d.*, u.name AS user_name, u.color AS user_color,
            v.title AS video_title, v.thumb_path, v.duration, v.orig_name
