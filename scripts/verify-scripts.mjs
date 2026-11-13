@@ -747,6 +747,51 @@ const fp2 = feedHooks.at(-1)?.body || {};
 ok(fp2.msgtype === 'markdown', '没配公网地址时回落到 markdown 文字列表', fp2.msgtype);
 ok(String(fp2.markdown?.text || '').includes('公网访问地址'), '回落消息里提示配置公网地址', String(fp2.markdown?.text || '').slice(0, 120));
 
+/* ---------------- v1.10.0 播放代理（HEVC 原片 → H.264 播放版） ---------------- */
+console.log('\n== v1.10.0 播放代理 ==');
+// 前面「删除素材」用例把 vid 删了，这里另取一条现存素材
+const wdb2 = new Database(path.join(env.DATA_DIR, 'app.db'));
+const pvRow = wdb2.prepare("SELECT id FROM videos WHERE space='daily' ORDER BY created_at DESC LIMIT 1").get();
+const pv = pvRow?.id;
+ok(!!pv, '找到一条现存素材用于播放测试');
+
+// 1) 普通 H.264 轻片子：直接播原片，不浪费 CPU 转码
+const light = await fetch(`${BASE}/api/videos/${pv}/play?uid=${uid}`, { headers: { 'x-user-id': uid } });
+ok(light.status === 200, '播放接口可用', String(light.status));
+ok(light.headers.get('x-play-source') === 'original', 'H.264 轻片子直接播原片（不转码）', light.headers.get('x-play-source'));
+try { await light.body?.cancel?.(); } catch { /* ignore */ }
+
+// 2) Range 分片：移动端拖进度条、iOS 起播都依赖 206
+const ranged = await fetch(`${BASE}/api/videos/${pv}/play?uid=${uid}`, {
+  headers: { 'x-user-id': uid, Range: 'bytes=0-1023' },
+});
+ok(ranged.status === 206, '支持 Range 分片（206）', String(ranged.status));
+ok(/bytes 0-1023\//.test(ranged.headers.get('content-range') || ''), '返回 Content-Range', ranged.headers.get('content-range'));
+try { await ranged.body?.cancel?.(); } catch { /* ignore */ }
+
+// 3) 模拟手机 HEVC 原片 → 触发转码 → 播放源切到 proxy
+wdb2.prepare("UPDATE videos SET codec='hevc', width=1080, height=1920, proxy_state=NULL WHERE id=?").run(pv);
+const queued = await call('/videos/' + pv + '/proxy', { method: 'POST', uid });
+ok(queued.status === 200, '可手动排队转码', String(queued.status));
+
+let proxyState = '';
+for (let i = 0; i < 60; i++) {
+  await sleep(1000);
+  const d = await call('/videos/' + pv, { uid });
+  proxyState = d.data?.video?.proxy_state || '';
+  if (proxyState === 'done' || proxyState === 'failed') break;
+}
+ok(proxyState === 'done', '播放版转码完成', proxyState);
+
+const proxied = await fetch(`${BASE}/api/videos/${pv}/play?uid=${uid}`, { headers: { 'x-user-id': uid } });
+ok(proxied.headers.get('x-play-source') === 'proxy', 'HEVC 原片自动改播 H.264 播放版', proxied.headers.get('x-play-source'));
+ok(/video\/mp4/.test(proxied.headers.get('content-type') || ''), '播放版是 video/mp4', proxied.headers.get('content-type'));
+const buf = Buffer.from(await proxied.arrayBuffer());
+ok(buf.subarray(0, 2048).includes(Buffer.from('moov')) || buf.subarray(0, 1024 * 1024).includes(Buffer.from('moov')),
+  '播放版是 faststart（moov 在前 1MB 内）');
+ok(buf.length > 1000, '播放版文件非空', String(buf.length));
+wdb2.close();
+
 /* ---------------- 静态资源一致性（防 UI 路径回归） ---------------- */
 console.log('\n== 静态资源一致性 ==');
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');

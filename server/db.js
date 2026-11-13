@@ -164,6 +164,8 @@ const migrations = [
   ['scripts', 'replicate_prompt', "ALTER TABLE scripts ADD COLUMN replicate_prompt TEXT NOT NULL DEFAULT ''"],
   // ---- v1.7：群通知（评论 @人员 → 群里真实艾特，需成员的外部账号标识）----
   ['users', 'notify_key', 'ALTER TABLE users ADD COLUMN notify_key TEXT'],
+  // ---- v1.10.0：播放代理（HEVC 原片转 H.264 播放版）----
+  ['videos', 'proxy_state', 'ALTER TABLE videos ADD COLUMN proxy_state TEXT'],
 ];
 for (const [table, col, sql] of migrations) {
   if (!hasColumn(table, col)) {

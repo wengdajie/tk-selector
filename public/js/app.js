@@ -2470,13 +2470,29 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
 
   const player = el('div', { class: 'player' + (landscape ? ' landscape' : '') });
   const vidEl = el('video', {
-    src: mediaUrl(`/api/videos/${v.id}/stream`),
+    src: mediaUrl(`/api/videos/${v.id}/play`),
     controls: true,
     autoplay: true,
     playsinline: true,
     poster: v.thumb_path ? mediaUrl(`/api/videos/${v.id}/thumb`) : '',
   });
   player.append(vidEl);
+
+  // 手机原片多是 HEVC，浏览器解不了时服务端正在现转 H.264 播放版 → 自动等待重试
+  let playRetry = 0;
+  vidEl.addEventListener('error', () => {
+    if (playRetry >= 4) { toast('这条视频暂时无法播放，稍后再试或先下载', 'err'); return; }
+    playRetry++;
+    toast('正在生成流畅播放版，稍等几秒…');
+    setTimeout(() => {
+      vidEl.src = mediaUrl(`/api/videos/${v.id}/play`) + '&_r=' + Date.now();
+      vidEl.play?.().catch(() => {});
+    }, 4000);
+  });
+  // 播放版还在转时给个提示（首次可能等十几秒，之后秒开）
+  if (v.proxy_state === 'pending' || v.proxy_state === 'running') {
+    toast('首次播放会先转出流畅版，稍等一下就好', 'ok', 3200);
+  }
 
   const scroll = el('div', { class: 'drawer-scroll' });
 

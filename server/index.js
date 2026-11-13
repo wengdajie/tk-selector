@@ -108,6 +108,7 @@ app.listen(config.port, config.host, () => {
   console.log(`  扫描目录   ${config.scanDir} (${config.scanMode})`);
   scanner.startScheduler();
   try { require('./lib/qcworker').start(); } catch (e) { console.warn('[qc] 启动失败:', e.message); }
+  try { require('./lib/proxy').recoverStale(); } catch (e) { console.warn('[proxy] 启动复位失败:', e.message); }
 });
 
 module.exports = app;

@@ -77,7 +77,8 @@ function buildDom() {
   const stage = el('div', { class: 'feed-stage' });
   F.video = el('video', {
     class: 'feed-video', playsinline: true, loop: true, preload: 'auto',
-    ontimeupdate: onTime, onended: null, onclick: togglePlay,
+    ontimeupdate: onTime, onclick: togglePlay,
+    onerror: () => retryPlay(),
   });
 
   /* 顶部：关闭 / 计数 / 声音 / 遮罩勾选 */
@@ -152,7 +153,7 @@ function step(dir) {
 function show(idx, first = false) {
   F.idx = idx;
   const v = F.list[idx];
-  F.video.src = mediaUrl(`/api/videos/${v.id}/stream`);
+  F.video.src = mediaUrl(`/api/videos/${v.id}/play`);
   F.video.muted = F.muted;
   F.video.play?.().catch(() => { F.video.muted = true; F.muted = true; F.video.play?.().catch(() => {}); });
   F.counter.textContent = `${idx + 1} / ${F.list.length}`;
@@ -161,6 +162,23 @@ function show(idx, first = false) {
   else F.video.currentTime = 0;
 }
 const dirLabel = () => '';
+
+let retryTimer = null;
+let retryLeft = 3;
+/** 首次播放时服务端可能正在生成 H.264 播放版（原片 HEVC 浏览器解不了）→ 自动重试几次 */
+function retryPlay() {
+  if (!F || retryLeft <= 0) return;
+  retryLeft--;
+  if (retryTimer) clearTimeout(retryTimer);
+  toast('正在生成流畅播放版，稍等…');
+  retryTimer = setTimeout(() => {
+    if (!F) return;
+    const v = F.list[F.idx];
+    if (!v) return;
+    F.video.src = mediaUrl('/api/videos/' + v.id + '/play') + '&_r=' + Date.now();
+    F.video.play?.().catch(() => {});
+  }, 4000);
+}
 
 function togglePlay() {
   if (!F) return;

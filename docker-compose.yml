@@ -1,7 +1,7 @@
 services:
   tk-selector:
     build: .
-    image: tk-selector:1.9.0
+    image: tk-selector:1.10.0
     container_name: tk-selector
     restart: unless-stopped
     ports:
@@ -24,6 +24,7 @@ services:
       AI_MODEL: gpt-4o
       AI_FRAMES: "6"
       AI_TIMEOUT_MS: "300000"   # 单次拆解超时；慢模型可调大
+      # PROXY_ENABLED: "1"       # 播放版转码（HEVC→H.264）；低功耗 NAS 想省 CPU 可设 0
       # ---- 群通知（出厂默认值；部署后管理员在「系统设置」界面里改，立即生效）----
       NOTIFY_ENABLED: "1"
       NOTIFY_TYPE: wecom       # wecom | feishu | dingtalk

@@ -124,7 +124,12 @@ async function ingest(opts) {
     }
     throw e;
   }
-  return { video: db.prepare('SELECT * FROM videos WHERE id = ?').get(id), duplicate: false };
+  const fresh = db.prepare('SELECT * FROM videos WHERE id = ?').get(id);
+  // 入库即排队生成播放版（异步串行，不阻塞上传；下载仍走原片）
+  if (String(process.env.PROXY_ENABLED || '1') !== '0') {
+    try { require('./proxy').queue(id).catch(() => {}); } catch { /* ignore */ }
+  }
+  return { video: fresh, duplicate: false };
 }
 
 module.exports = { ingest };

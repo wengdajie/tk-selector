@@ -161,6 +161,37 @@ r.get('/videos/:id/stream', requireUser, (req, res) => {
   res.sendFile(abs);
 });
 
+/** 播放版：优先 H.264 代理（手机流畅），没有就现转或先发原片 */
+r.get('/videos/:id/play', requireUser, async (req, res) => {
+  const v = db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id);
+  if (!v) return res.status(404).json({ error: '视频不存在' });
+  const abs = path.join(config.mediaDir, v.file_path);
+  if (!fs.existsSync(abs)) return res.status(410).json({ error: '源文件已被移动或删除' });
+  const proxy = require('../lib/proxy');
+  // 首次播放：轻等 25 秒（17 秒的 1080p60 片子约 10-30 秒转完），转不出来就先给原片
+  if (!proxy.isReady(v.id) && proxy.needsProxy(v)) {
+    await proxy.queue(v.id, { maxWaitMs: 25000 });
+  }
+  if (proxy.isReady(v.id)) {
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Cache-Control', 'private, max-age=604800');
+    res.setHeader('X-Play-Source', 'proxy');
+    return res.sendFile(proxy.proxyFile(v.id));
+  }
+  res.setHeader('Content-Type', v.mime);
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.setHeader('X-Play-Source', 'original');
+  return res.sendFile(abs);
+});
+
+/** 手动触发/排队播放版转码 */
+r.post('/videos/:id/proxy', requireUser, (req, res) => {
+  const v = db.prepare('SELECT id FROM videos WHERE id = ?').get(req.params.id);
+  if (!v) return res.status(404).json({ error: '视频不存在' });
+  require('../lib/proxy').queue(v.id).catch(() => {});
+  res.json({ ok: true, queued: true });
+});
+
 r.get('/videos/:id/thumb', (req, res) => {
   const v = db.prepare('SELECT thumb_path FROM videos WHERE id = ?').get(req.params.id);
   if (!v?.thumb_path) return res.status(404).end();
