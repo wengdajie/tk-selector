@@ -172,6 +172,12 @@ for (const [table, col, sql] of migrations) {
   }
 }
 
+// ---- v1.9.0：素材库不再参与投放体检（存量排队项标记为 skipped，幂等）----
+{
+  const libSkipped = db.prepare("UPDATE videos SET qc_status='skipped' WHERE space='library' AND qc_status='pending'").run();
+  if (libSkipped.changes) console.log(`[db] 素材库 ${libSkipped.changes} 条排队体检已标记 skipped（素材库不参与体检）`);
+}
+
 // ---------- 种子数据：保证始终有一个可登录的管理员 ----------
 const { hashPassword } = require('./lib/password');
 

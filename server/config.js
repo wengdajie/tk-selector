@@ -43,7 +43,7 @@ module.exports = {
     apiKey: process.env.AI_API_KEY || '',
     model: process.env.AI_MODEL || 'gpt-4o',
     frames: Math.min(10, Math.max(3, Number(process.env.AI_FRAMES || 6))),
-    timeoutMs: Number(process.env.AI_TIMEOUT_MS || 120000),
+    timeoutMs: Number(process.env.AI_TIMEOUT_MS || 300000),   // 拆解一次要传多张图 + 长 prompt，120s 对慢模型不够
   },
 
   // ---- 群通知（企业微信 / 飞书 / 钉钉 群机器人 webhook）----
@@ -54,5 +54,7 @@ module.exports = {
     secret: process.env.NOTIFY_SECRET || '',
     onUpload: String(process.env.NOTIFY_ON_UPLOAD ?? '1') !== '0',
     onComment: String(process.env.NOTIFY_ON_COMMENT ?? '1') !== '0',
+    // 公网访问地址（如 https://tk.example.com）：钉钉缩略图卡片要从公网拉图，内网地址钉钉拉不到
+    publicBase: (process.env.NOTIFY_PUBLIC_BASE || '').replace(/\/+$/, ''),
   },
 };

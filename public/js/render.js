@@ -62,6 +62,7 @@ export const qcFlags = v => String(v.qc_flags || '').split(',').filter(Boolean);
 
 export function qcBadges(v) {
   const rows = [];
+  if (v.space === 'library') return null;   // 素材库资料不参与体检，不显示体检徽标
   if (v.score_content != null) {
     rows.push(el('span', {
       class: 'flag ' + (v.score_content >= 80 ? 'ok' : 'plain'),

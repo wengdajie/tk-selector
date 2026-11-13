@@ -1,7 +1,7 @@
 services:
   tk-selector:
     build: .
-    image: tk-selector:1.8.0
+    image: tk-selector:1.9.0
     container_name: tk-selector
     restart: unless-stopped
     ports:
@@ -23,6 +23,7 @@ services:
       AI_API_KEY: ""          # 可留空：部署后在网页「系统设置」里填
       AI_MODEL: gpt-4o
       AI_FRAMES: "6"
+      AI_TIMEOUT_MS: "300000"   # 单次拆解超时；慢模型可调大
       # ---- 群通知（出厂默认值；部署后管理员在「系统设置」界面里改，立即生效）----
       NOTIFY_ENABLED: "1"
       NOTIFY_TYPE: wecom       # wecom | feishu | dingtalk
@@ -30,6 +31,7 @@ services:
       NOTIFY_SECRET: ""        # 钉钉/飞书「加签」密钥；企业微信机器人留空
       NOTIFY_ON_UPLOAD: "1"
       NOTIFY_ON_COMMENT: "1"
+      # NOTIFY_PUBLIC_BASE: https://tk.example.com   # 公网地址：钉钉缩略图卡片需要
     volumes:
       - ./data:/data
       # 拍摄投递目录：群晖共享文件夹真实路径，只读挂载

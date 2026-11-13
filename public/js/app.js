@@ -1172,6 +1172,8 @@ function renderSettings(d, nd) {
     ...Array.from({ length: 8 }, (_, i) => el('option', { value: String(i + 3) }, `${i + 3} 张`)));
   framesSel.value = String(d.frames || 6);
 
+  const timeoutIn = el('input', { type: 'number', min: '30', max: '900', step: '10', value: String(Math.round((d.timeoutMs || 300000) / 1000)), disabled: !canEdit });
+
   const enabledCb = el('input', { type: 'checkbox', disabled: !canEdit });
   enabledCb.checked = d.enabled !== false;
 
@@ -1180,6 +1182,7 @@ function renderSettings(d, nd) {
       ai_base_url: baseUrl.value.trim(),
       ai_model: model.value.trim(),
       ai_frames: framesSel.value,
+      ai_timeout_ms: String(Math.min(900, Math.max(30, Number(timeoutIn.value) || 300)) * 1000),
       ai_enabled: !!enabledCb.checked,
     };
     if (apiKey.value.trim()) body.ai_api_key = apiKey.value.trim();
@@ -1241,6 +1244,11 @@ function renderSettings(d, nd) {
         framesSel,
         el('p', { class: 'sethint' }, '3-10 张；越多拆得越准、每次调用也越贵。'),
       ),
+      el('div', { class: 'field' },
+        el('label', {}, '单次拆解超时（秒）', srcDot('ai_timeout_ms')),
+        timeoutIn,
+        el('p', { class: 'sethint' }, '30-900 秒。慢模型 / 多图 + 长 prompt 容易超时，默认 300 秒；拆解报「模型响应超时」就调大。'),
+      ),
     ),
     el('label', { class: 'setcheck' },
       enabledCb,
@@ -1284,6 +1292,10 @@ function renderNotifyPanel(d) {
     type: 'password', autocomplete: 'new-password', disabled: !canEdit,
     placeholder: d.secretMasked ? `当前 ${d.secretMasked}（留空 = 保持不变）` : '机器人开了「加签」才需要填',
   });
+  const publicIn = el('input', {
+    value: d.publicBase || '', disabled: !canEdit,
+    placeholder: 'https://tk.example.com（不填则只发文字列表）',
+  });
   const onUploadCb = el('input', { type: 'checkbox', disabled: !canEdit });
   onUploadCb.checked = d.onUpload !== false;
   const onCommentCb = el('input', { type: 'checkbox', disabled: !canEdit });
@@ -1309,6 +1321,7 @@ function renderNotifyPanel(d) {
     const body = {
       notify_type: typeSel.value,
       notify_url: urlIn.value.trim(),
+      notify_public_base: publicIn.value.trim(),
       notify_enabled: !!enabledCb.checked,
       notify_on_upload: !!onUploadCb.checked,
       notify_on_comment: !!onCommentCb.checked,
@@ -1354,6 +1367,13 @@ function renderNotifyPanel(d) {
       el('label', {}, '加签密钥（可选）', srcDot('notify_secret')),
       el('div', { class: 'pw-wrap' }, secretIn),
       el('p', { class: 'sethint' }, '钉钉 / 飞书机器人安全设置选了「加签」时才需要；企业微信机器人不用填。'),
+    ),
+    el('div', { class: 'field' },
+      el('label', {}, '公网访问地址（缩略图卡片需要）', srcDot('notify_public_base')),
+      publicIn,
+      el('p', { class: 'sethint' }, typeSel.value === 'dingtalk'
+        ? '钉钉群里的图片由钉钉客户端从公网拉取，NAS 内网地址它打不开。填好公网域名（DDNS / 反向代理 / 内网穿透任一种，能访问本工作台即可），素材入库通知就会变成带封面缩略图的卡片。'
+        : '钉钉缩略图卡片必须能公网访问本工作台；企业微信也会把封面图内嵌进消息。不填则发纯文字列表。'),
     ),
     el('div', { class: 'field-row' },
       el('label', { class: 'setcheck' },
@@ -2586,7 +2606,16 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
     } catch (e) { toast(e.message, 'err'); }
   };
 
-  const qcSec = el('div', { class: 'dsec' },
+  const qcSec = v.space === 'library'
+    ? el('div', { class: 'dsec' },
+        el('div', { class: 'qc-head' },
+          el('div', { class: 'qc-score' }, '—'),
+          el('div', { style: { flex: 1, minWidth: 0 } },
+            el('div', { class: 'qc-title' }, '素材库资料不参与投放体检'),
+            el('div', { class: 'qc-sub' }, '素材库存的是通用素材 / 参考资料；只有「每日选片」里的投放素材才做体检'),
+          ),
+        ))
+    : el('div', { class: 'dsec' },
     el('div', { class: 'qc-head' },
       el('div', { class: `qc-score ${scoreCls}` }, v.qc_status === 'pending' ? '…' : (v.qc_score == null ? '—' : String(v.qc_score))),
       el('div', { style: { flex: 1, minWidth: 0 } },
@@ -2625,7 +2654,7 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
           ),
         )
       : null,
-  );
+  );   // 三元结束：素材库（不体检） / 常规体检分支
 
   // ---- 内容评分（分维度）+ 阶段流转 ----
   const sc = parseScores(v.scores);

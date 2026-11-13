@@ -169,7 +169,7 @@ const env = {
   AI_API_KEY: 'sk-mock-key',
   AI_MODEL: 'mock-vision',
   AI_FRAMES: '4',
-  AI_TIMEOUT_MS: '30000',
+  AI_TIMEOUT_MS: '300000',   // v1.9.0 默认放宽到 5 分钟（慢模型拆解不再 120s 超时）
 };
 fs.mkdirSync(path.join(tmp, 'data'), { recursive: true });
 fs.mkdirSync(path.join(tmp, 'watch'), { recursive: true });
@@ -659,6 +659,93 @@ ok(deep2.data.modelOk === true && deep2.data.modelEcho === 'mock2-vision',
 await call('/settings/ai', { method: 'PUT', uid, body: { ai_base_url: `http://127.0.0.1:${aiPort}/v1` } });
 const back = await call('/settings/ai/test', { uid });
 ok(back.data.reachable === true && (back.data.models || []).includes('mock-vision'), '切回后恢复原方案');
+
+/* ---------------- v1.9.0：AI 超时可配 / 素材库不体检 / 钉钉缩略图卡片 ---------------- */
+console.log('\n== v1.9.0 AI 超时 ==');
+const tDef = await call('/settings/ai', { uid });
+ok(tDef.data.timeoutMs === 300000, '默认拆解超时 5 分钟', String(tDef.data.timeoutMs));
+const tSet = await call('/settings/ai', { method: 'PUT', uid, body: { ai_timeout_ms: '600000' } });
+ok(tSet.status === 200 && tSet.data.timeoutMs === 600000, '超时可改到 10 分钟', String(tSet.data.timeoutMs));
+const tBad = await call('/settings/ai', { method: 'PUT', uid, body: { ai_timeout_ms: '5000' } });
+ok(tBad.status === 400, '超时低于 30 秒被拒', String(tBad.status));
+const tSrc = await call('/settings/ai', { uid });
+ok(tSrc.data.sources?.ai_timeout_ms === 'db', '超时来源标记为 db');
+
+console.log('\n== v1.9.0 素材库不体检 ==');
+const mkSample = (name, size, dur) => {
+  const f = path.join(tmp, name);
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+    '-i', `testsrc2=size=${size}:rate=24`, '-t', String(dur), '-pix_fmt', 'yuv420p', f]);
+  return f;
+};
+const libSample = mkSample('qc-lib.mp4', '320x240', 1.2);
+const thumbSample = mkSample('qc-thumb.mp4', '360x640', 1.5);
+const plainSample = mkSample('qc-plain.mp4', '400x400', 1.8);
+const qcLib = await (async () => {
+  const fd = new FormData();
+  fd.append('files', new Blob([fs.readFileSync(libSample)], { type: 'video/mp4' }), 'libqc.mp4');
+  fd.append('space', 'library');
+  fd.append('title', '素材库体检验证');
+  const r = await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: fd });
+  return r.json();
+})();
+const libVid = qcLib.items?.[0]?.id;
+ok(!!libVid, '上传一条素材库素材');
+await sleep(500);
+const libDetail = await call('/videos/' + libVid, { uid });
+ok(libDetail.data?.video?.qc_status === 'skipped', '素材库素材下载即标记 skipped（不进体检队列）', libDetail.data?.video?.qc_status);
+const libRecheck = await call('/videos/' + libVid + '/qc', { method: 'POST', uid });
+ok(libRecheck.status === 200 || libRecheck.status === 400, '素材库「重新体检」不会真正排队', String(libRecheck.status));
+await sleep(600);
+const libAfter = await call('/videos/' + libVid, { uid });
+ok(libAfter.data?.video?.qc_status === 'skipped', '手动体检后仍是 skipped', libAfter.data?.video?.qc_status);
+
+console.log('\n== v1.9.0 钉钉缩略图卡片（feedCard） ==');
+// 开一个收集器，模拟钉钉
+const feedHooks = [];
+const feedSrv = http.createServer((req, res) => {
+  if (req.url === '/__probe') { res.writeHead(200); return res.end('ok'); }
+  let buf = '';
+  req.on('data', c => { buf += c; });
+  req.on('end', () => {
+    let body = {};
+    try { body = JSON.parse(buf || '{}'); } catch { /* ignore */ }
+    feedHooks.push({ url: req.url, body });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"errcode":0}');
+  });
+});
+await listenSafe(feedSrv);
+extraClosers.push(() => feedSrv.close());
+const feedUrl = `http://127.0.0.1:${feedSrv.address().port}/hook`;
+// 钉钉 + 公网地址（用本机地址模拟公网可达）
+await call('/settings/notify', { method: 'PUT', uid, body: {
+  notify_type: 'dingtalk', notify_url: feedUrl, notify_public_base: 'https://tk.example.com',
+  notify_enabled: true, notify_on_upload: true, notify_on_comment: false,
+} });
+const ffd = new FormData();
+ffd.append('files', new Blob([fs.readFileSync(sample), { type: 'video/mp4' }]), 'thumb1.mp4');
+ffd.append('space', 'daily');
+ffd.append('title', '缩略图卡片验证');
+await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: ffd });
+await sleep(700);
+const fp = feedHooks.at(-1)?.body || {};
+ok(fp.msgtype === 'feedCard', '钉钉入库通知用 feedCard 缩略图卡片', fp.msgtype);
+const link0 = fp.feedCard?.links?.[0] || {};
+ok(!!link0.picURL && link0.picURL.startsWith('https://tk.example.com/api/videos/'), '卡片带封面图 picURL（公网地址）', link0.picURL);
+ok(!!link0.messageURL && link0.messageURL.includes('/stream'), '卡片点击直达视频', link0.messageURL);
+ok(String(link0.title || '').includes('缩略图卡片验证'), '卡片标题是素材标题', link0.title);
+// 清空公网地址 → 回落到文字列表
+await call('/settings/notify', { method: 'PUT', uid, body: { notify_public_base: '' } });
+const ffd2 = new FormData();
+ffd2.append('files', new Blob([fs.readFileSync(sample2), { type: 'video/mp4' }]), 'nothumb.mp4');
+ffd2.append('space', 'daily');
+ffd2.append('title', '无公网回落验证');
+await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: ffd2 });
+await sleep(700);
+const fp2 = feedHooks.at(-1)?.body || {};
+ok(fp2.msgtype === 'markdown', '没配公网地址时回落到 markdown 文字列表', fp2.msgtype);
+ok(String(fp2.markdown?.text || '').includes('公网访问地址'), '回落消息里提示配置公网地址', String(fp2.markdown?.text || '').slice(0, 120));
 
 /* ---------------- 静态资源一致性（防 UI 路径回归） ---------------- */
 console.log('\n== 静态资源一致性 ==');

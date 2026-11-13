@@ -12,7 +12,7 @@ const insertVideo = db.prepare(`
                       codec,pix_fmt,fps,has_audio,qc_status)
   VALUES (@id,@space,@title,@orig_name,@file_path,@thumb_path,@mime,@size,@duration,@width,@height,
           @shoot_date,@source,@src_path,@uploader_id,@status,@tags,@request_id,@dedupe_key,@created_at,@updated_at,
-          @codec,@pix_fmt,@fps,@has_audio,'pending')
+          @codec,@pix_fmt,@fps,@has_audio,@qc_status)
 `);
 
 async function copyAcross(src, dest) {
@@ -110,6 +110,8 @@ async function ingest(opts) {
     pix_fmt: meta?.pixFmt || null,
     fps: meta?.fps || null,
     has_audio: meta ? (meta.hasAudio ? 1 : 0) : 1,
+    // 体检只针对投放素材（每日选片）；素材库是资料/参考素材，不排体检队列
+    qc_status: space === 'library' ? 'skipped' : 'pending',
   };
   try {
     insertVideo.run(row);

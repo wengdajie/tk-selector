@@ -108,8 +108,25 @@ async function send(text, mentions = []) {
   }
 }
 
+/** 直接发一个自定义 payload（钉钉 feedCard 等结构不同于文本） */
+async function sendPayload(payload) {
+  const cfg = settings.getNotify();
+  if (!cfg.enabled || !cfg.url || !TYPES.includes(cfg.type)) return { skipped: true };
+  try {
+    return await sendRaw(cfg, '', [], payload);
+  } catch (e) {
+    console.warn('[notify] 推送失败:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+/** 公网基础地址（缩略图必须公网可达，钉钉/企微客户端要去拉图） */
+const publicBase = () => settings.getNotify().publicBase || '';
+const thumbUrl = (v, base) => base + '/api/videos/' + v.id + '/thumb';
+const streamUrl = (v, base) => base + '/api/videos/' + v.id + '/stream';
+
 /** 真正发包（带一次重试）；「测试」接口用它拿错误信息 */
-async function sendRaw(cfg, text, mentions) {
+async function sendRaw(cfg, text, mentions, payloadOverride) {
   let url = cfg.url;
   if (cfg.type === 'dingtalk' && cfg.secret) {
     // 钉钉官方算法：key=密钥，消息体 = `时间戳\n密钥`（注意不是只签时间戳！）
@@ -117,7 +134,7 @@ async function sendRaw(cfg, text, mentions) {
     const sign = encodeURIComponent(crypto.createHmac('sha256', cfg.secret).update(`${ts}\n${cfg.secret}`).digest('base64'));
     url += (url.includes('?') ? '&' : '?') + `timestamp=${ts}&sign=${sign}`;
   }
-  const payload = buildPayload(cfg.type, text, mentions);
+  const payload = payloadOverride || buildPayload(cfg.type, text, mentions);
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
     try { return { ok: await postJson(url, payload) }; }
@@ -139,15 +156,35 @@ function onUpload(videos, uploader) {
   if (!cfg.onUpload) return;
   const who = uploader?.name || '投递目录扫描';
   const space = videos[0].space === 'library' ? '素材库' : '每日选片';
-  const plain = cfg.type === 'feishu';   // 飞书 text 消息不吃 markdown
-  const lines = videos.slice(0, 5).map(v =>
-    `${plain ? '·' : '-'} 《${v.title || v.orig_name || '未命名'}》${v.duration ? `（${fmtDur(v.duration)}）` : ''}`);
+  const base = publicBase();
+  const thumbs = base && videos.filter(v => v.thumb_path);
+  const titleOf = v => v.title || v.orig_name || '未命名';
+  const durOf = v => (v.duration ? ' ' + fmtDur(v.duration) : '');
+
+  // 钉钉：feedCard 缩略图卡片（标题 + 封面图 + 点击直达），最多 8 条
+  // 注意：feedCard 不支持 @，入库通知本身也不需要艾特
+  if (cfg.type === 'dingtalk' && thumbs.length) {
+    const links = videos.slice(0, 8).map(v => ({
+      title: '【' + space + '】' + titleOf(v) + durOf(v),
+      messageURL: streamUrl(v, base),
+      picURL: thumbUrl(v, base),
+    }));
+    return sendPayload({ msgtype: 'feedCard', feedCard: { links } });
+  }
+
+  const plain = cfg.type === 'feishu';   // 飞书 text 消息不吃 markdown 和图片
+  const lines = videos.slice(0, 5).map(v => {
+    const line = `${plain ? '·' : '-'} 《${titleOf(v)}》${durOf(v)}`;
+    // 企业微信 markdown 支持内嵌图片：带公网地址时贴封面缩略图
+    return cfg.type === 'wecom' && thumbs.includes(v) ? line + '\n![' + titleOf(v) + '](' + thumbUrl(v, base) + ')' : line;
+  });
   const more = videos.length > 5 ? `\n…等共 ${videos.length} 条` : '';
+  const tip = base ? '' : '\n（配置「公网访问地址」后，钉钉群会直接显示封面缩略图卡片）';
   const text = [
     plain ? '📥 素材入库' : '**📥 素材入库**',
     `${who} 新入库 ${videos.length} 条素材到「${space}」`,
     ...lines,
-  ].join('\n') + more;
+  ].join('\n') + more + tip;
   return send(text, []);
 }
 

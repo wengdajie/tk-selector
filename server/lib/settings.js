@@ -15,6 +15,9 @@ const insStmt = db.prepare(`
 /** 读原始值：null / 未写入 = 未设置（回退环境变量）；'' = 管理员明确清空 */
 const raw = key => getStmt.get(key)?.value ?? null;
 
+/** AI 超时范围：30 秒 ~ 15 分钟 */
+const clampMs = v => Math.min(900000, Math.max(30000, Number(v) || 300000));
+
 /** 写入；null = 清除并回退默认；'' = 明确置空（仅 Key 这类敏感项用） */
 function set(key, value, userId = null) {
   insStmt.run({ k: key, v: value ?? null, u: userId, t: Date.now() });
@@ -30,7 +33,7 @@ function getAi() {
     apiKey: raw('ai_api_key') ?? config.ai.apiKey,
     model: raw('ai_model') || config.ai.model,
     frames: clampFrames(raw('ai_frames') ?? config.ai.frames),
-    timeoutMs: config.ai.timeoutMs,
+    timeoutMs: clampMs(raw('ai_timeout_ms') ?? config.ai.timeoutMs),
   };
 }
 
@@ -42,10 +45,10 @@ function aiOverlay() {
     ai_api_key: raw('ai_api_key'),
     ai_model: raw('ai_model'),
     ai_frames: raw('ai_frames'),
+    ai_timeout_ms: raw('ai_timeout_ms'),
   };
 }
 
-/** 群通知的有效配置（同 AI：每次现读，改完不用重启） */
 const NOTIFY_TYPES = ['wecom', 'feishu', 'dingtalk'];
 function getNotify() {
   const t = raw('notify_type');
@@ -57,6 +60,7 @@ function getNotify() {
     secret: raw('notify_secret') ?? config.notify.secret,
     onUpload: (raw('notify_on_upload') ?? (config.notify.onUpload ? '1' : '0')) !== '0',
     onComment: (raw('notify_on_comment') ?? (config.notify.onComment ? '1' : '0')) !== '0',
+    publicBase: ((raw('notify_public_base') ?? config.notify.publicBase) || '').trim().replace(/\/+$/, ''),
   };
 }
 
@@ -69,6 +73,7 @@ function notifyOverlay() {
     notify_secret: raw('notify_secret'),
     notify_on_upload: raw('notify_on_upload'),
     notify_on_comment: raw('notify_on_comment'),
+    notify_public_base: raw('notify_public_base'),
   };
 }
 

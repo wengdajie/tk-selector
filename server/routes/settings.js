@@ -38,6 +38,7 @@ const FIELD_CHECKS = [
   ['ai_model', '模型', v => String(v).trim().length > 0 && String(v).length <= 80, '不能为空'],
   ['ai_api_key', 'API Key', v => String(v).length <= 200, '太长了'],
   ['ai_frames', '抽帧数', v => Number.isInteger(Number(v)) && Number(v) >= 3 && Number(v) <= 10, '3 - 10 之间的整数'],
+  ['ai_timeout_ms', '超时', v => Number.isFinite(Number(v)) && Number(v) >= 30000 && Number(v) <= 900000, '30 - 900 秒之间'],
 ];
 
 r.put('/settings/ai', requireUser, requireAdmin, (req, res) => {
@@ -107,6 +108,7 @@ const NOTIFY_CHECKS = [
   ['notify_type', '机器人类型', v => notify.TYPES.includes(v), '只能是 wecom / feishu / dingtalk'],
   ['notify_url', 'Webhook 地址', v => /^https?:\/\/.+/.test(v) && v.length <= 500, '要以 http:// 或 https:// 开头'],
   ['notify_secret', '加签密钥', v => String(v).length <= 200, '太长了'],
+  ['notify_public_base', '公网访问地址', v => /^https?:\/\/.+/.test(v) && v.length <= 200, '要以 http:// 或 https:// 开头'],
 ];
 
 r.put('/settings/notify', requireUser, requireAdmin, (req, res) => {

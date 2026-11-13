@@ -305,6 +305,8 @@ r.post('/videos/bulk-status', requireUser, (req, res) => {
 /** 单条素材立即体检（详情页按钮） */
 r.post('/videos/:id/qc', requireUser, async (req, res) => {
   try {
+    const row = db.prepare('SELECT space FROM videos WHERE id = ?').get(req.params.id);
+    if (row?.space === 'library') return res.status(400).json({ error: '素材库资料不参与投放体检（只有每日选片的素材需要）' });
     const { runOne } = require('../lib/qcworker');
     const out = await runOne(req.params.id);
     if (!out.ok) return res.status(404).json({ error: out.error });
@@ -318,7 +320,8 @@ r.post('/videos/:id/qc', requireUser, async (req, res) => {
 r.post('/videos/bulk-qc', requireUser, (req, res) => {
   const ids = (req.body?.ids || []).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: '未选择视频' });
-  const stmt = db.prepare("UPDATE videos SET qc_status='pending' WHERE id = ?");
+  // 素材库资料不参与体检
+  const stmt = db.prepare("UPDATE videos SET qc_status='pending' WHERE id = ? AND space = 'daily'");
   const tx = db.transaction(() => ids.forEach(id => stmt.run(id)));
   tx();
   require('../lib/qcworker').tick().catch(() => {});

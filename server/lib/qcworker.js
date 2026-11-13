@@ -13,9 +13,9 @@ const phash = require('./phash');
 const state = { running: false, lastRunAt: null, pending: 0, lastError: null };
 
 const pickPending = db.prepare(
-  "SELECT * FROM videos WHERE qc_status = 'pending' ORDER BY created_at DESC LIMIT 2"
+  "SELECT * FROM videos WHERE qc_status = 'pending' AND space = 'daily' ORDER BY created_at DESC LIMIT 2"
 );
-const countPending = db.prepare("SELECT COUNT(*) c FROM videos WHERE qc_status = 'pending'");
+const countPending = db.prepare("SELECT COUNT(*) c FROM videos WHERE qc_status = 'pending' AND space = 'daily'");
 
 const updateOk = db.prepare(`
   UPDATE videos SET qc_status='done', qc_flags=@flags, qc_score=@score, lufs=@lufs, peak_db=@peak,
