@@ -245,6 +245,7 @@ function bindGlobal() {
   };
   document.getElementById('nav').addEventListener('click', onNav);
   document.getElementById('navMain').addEventListener('click', onNav);
+  document.getElementById('navAdmin').addEventListener('click', onNav);
   document.getElementById('mobileNav').addEventListener('click', onNav);
 
   document.getElementById('searchInput').addEventListener('input', debounce(e => {

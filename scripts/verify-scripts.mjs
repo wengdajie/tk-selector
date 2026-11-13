@@ -617,6 +617,21 @@ await call('/settings/ai', { method: 'PUT', uid, body: { ai_base_url: `http://12
 const back = await call('/settings/ai/test', { uid });
 ok(back.data.reachable === true && (back.data.models || []).includes('mock-vision'), '切回后恢复原方案');
 
+/* ---------------- 静态资源一致性（防 UI 路径回归） ---------------- */
+console.log('\n== 静态资源一致性 ==');
+const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
+const appjs = fs.readFileSync(path.join(root, 'public', 'js', 'app.js'), 'utf8');
+const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const mHtml = html.match(/app\.js\?v=([\w.]+)/);
+ok(!!mHtml, 'index.html 引用了带版本号的 app.js', '缺 ?v=');
+ok(mHtml && mHtml[1] === pkg.version, '前端版本号与 package.json 一致',
+  `html=${mHtml?.[1]} pkg=${pkg.version}`);
+for (const navEl of ['nav', 'navMain', 'navAdmin', 'mobileNav']) {
+  ok(appjs.includes(`getElementById('${navEl}')`), `侧边栏 ${navEl} 已绑定点击事件`);
+}
+ok(html.includes('data-view="settings"'), 'index.html 有系统设置入口');
+ok(appjs.includes("view === 'settings'"), 'app.js 支持设置视图切换');
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 if (fail) console.log('\n服务端日志片段：\n' + log.slice(-1500));
 console.log(`临时目录：${tmp}`);
