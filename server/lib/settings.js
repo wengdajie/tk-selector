@@ -61,6 +61,8 @@ function getNotify() {
     onUpload: (raw('notify_on_upload') ?? (config.notify.onUpload ? '1' : '0')) !== '0',
     onComment: (raw('notify_on_comment') ?? (config.notify.onComment ? '1' : '0')) !== '0',
     publicBase: ((raw('notify_public_base') ?? config.notify.publicBase) || '').trim().replace(/\/+$/, ''),
+    // 跳转链接地址：可填内网 IP（如 http://192.168.1.4:8899），不填则用公网地址
+    linkBase: (((raw('notify_link_base') ?? config.notify.linkBase) || '').trim() || '').replace(/\/+$/, ''),
   };
 }
 
@@ -74,6 +76,7 @@ function notifyOverlay() {
     notify_on_upload: raw('notify_on_upload'),
     notify_on_comment: raw('notify_on_comment'),
     notify_public_base: raw('notify_public_base'),
+    notify_link_base: raw('notify_link_base'),
   };
 }
 

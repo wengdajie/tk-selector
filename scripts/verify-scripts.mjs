@@ -733,7 +733,14 @@ const fp = feedHooks.at(-1)?.body || {};
 ok(fp.msgtype === 'feedCard', '钉钉入库通知用 feedCard 缩略图卡片', fp.msgtype);
 const link0 = fp.feedCard?.links?.[0] || {};
 ok(!!link0.picURL && link0.picURL.startsWith('https://tk.example.com/api/videos/'), '卡片带封面图 picURL（公网地址）', link0.picURL);
-ok(!!link0.messageURL && link0.messageURL.includes('/stream'), '卡片点击直达视频', link0.messageURL);
+ok(String(link0.messageURL || '').startsWith('dingtalk://dingtalkclient/page/link?url='),
+  '卡片链接走 dingtalk:// 协议（强制系统浏览器打开，不走钉钉内置浏览器）', link0.messageURL);
+{
+  const u = new URL(String(link0.messageURL || '').replace('dingtalk://dingtalkclient/page/link', 'https://x/'));
+  const inner = decodeURIComponent(u.searchParams.get('url') || '');
+  ok(inner.startsWith('https://tk.example.com/?open='), '链接落点是单素材深链（?open=id）', inner);
+  ok(u.searchParams.get('pc_slide') === 'false', 'pc_slide=false（PC 弹系统浏览器）', u.searchParams.get('pc_slide'));
+}
 ok(String(link0.title || '').includes('缩略图卡片验证'), '卡片标题是素材标题', link0.title);
 // 清空公网地址 → 回落到文字列表
 await call('/settings/notify', { method: 'PUT', uid, body: { notify_public_base: '' } });
@@ -746,6 +753,33 @@ await sleep(700);
 const fp2 = feedHooks.at(-1)?.body || {};
 ok(fp2.msgtype === 'markdown', '没配公网地址时回落到 markdown 文字列表', fp2.msgtype);
 ok(String(fp2.markdown?.text || '').includes('公网访问地址'), '回落消息里提示配置公网地址', String(fp2.markdown?.text || '').slice(0, 120));
+
+console.log('\n== v1.9.1 钉钉链接：跳转地址 + 外部浏览器 ==');
+await call('/settings/notify', { method: 'PUT', uid, body: {
+  notify_type: 'dingtalk', notify_url: feedUrl, notify_public_base: 'https://tk.example.com',
+  notify_link_base: 'http://192.168.1.4:8899', notify_enabled: true, notify_on_upload: true, notify_on_comment: true,
+} });
+const lbSample = mkSample('qc-link.mp4', '280x480', 1.1);
+const lbFd = new FormData();
+lbFd.append('files', new Blob([fs.readFileSync(lbSample)], { type: 'video/mp4' }), 'link.mp4');
+lbFd.append('space', 'daily');
+lbFd.append('title', '跳转地址验证');
+const lbRes = await (await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: lbFd })).json();
+const pvForLink = lbRes.items?.[0]?.id;
+await sleep(700);
+const lbCard = feedHooks.at(-1)?.body || {};
+const lbUrl = new URL(String(lbCard.feedCard?.links?.[0]?.messageURL || '').replace('dingtalk://dingtalkclient/page/link', 'https://x/'));
+const lbInner = decodeURIComponent(lbUrl.searchParams.get('url') || '');
+ok(lbInner.startsWith('http://192.168.1.4:8899/?open='), '跳转地址可独立配内网 IP（缩略图仍用公网）', lbInner);
+ok(String(lbCard.feedCard?.links?.[0]?.picURL || '').startsWith('https://tk.example.com/'), '缩略图仍走公网地址（内网拉不到图）', lbCard.feedCard?.links?.[0]?.picURL);
+
+// 评论通知也带可点击链接
+await call('/settings/notify', { method: 'PUT', uid, body: { notify_on_comment: true } });
+ok(!!pvForLink, '取到跳转验证素材 id');
+await call('/videos/' + pvForLink + '/comments', { method: 'POST', uid, body: { body: '链接验证评论' } });
+await sleep(700);
+const cmMsg = String(feedHooks.at(-1)?.body?.markdown?.text || '');
+ok(cmMsg.includes('dingtalk://dingtalkclient/page/link'), '评论通知带可点击链接（dingtalk://）', cmMsg.slice(-120));
 
 /* ---------------- v1.10.0 播放代理（HEVC 原片 → H.264 播放版） ---------------- */
 console.log('\n== v1.10.0 播放代理 ==');

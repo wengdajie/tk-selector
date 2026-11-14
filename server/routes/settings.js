@@ -109,6 +109,7 @@ const NOTIFY_CHECKS = [
   ['notify_url', 'Webhook 地址', v => /^https?:\/\/.+/.test(v) && v.length <= 500, '要以 http:// 或 https:// 开头'],
   ['notify_secret', '加签密钥', v => String(v).length <= 200, '太长了'],
   ['notify_public_base', '公网访问地址', v => /^https?:\/\/.+/.test(v) && v.length <= 200, '要以 http:// 或 https:// 开头'],
+  ['notify_link_base', '跳转地址', v => /^https?:\/\/.+/.test(v) && v.length <= 200, '要以 http:// 或 https:// 开头'],
 ];
 
 r.put('/settings/notify', requireUser, requireAdmin, (req, res) => {

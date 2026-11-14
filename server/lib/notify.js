@@ -120,6 +120,25 @@ async function sendPayload(payload) {
   }
 }
 
+/** 链接落点：优先「跳转地址」（可填内网 IP），否则公网地址 */
+const linkBase = cfg => cfg.linkBase || cfg.publicBase || '';
+
+/**
+ * 钉钉：把链接包一层 dingtalk:// 协议，强制用系统浏览器打开。
+ * 不包的话钉钉会用自己的内置浏览器（webview）打开，视频常播不了、也没法下载。
+ * pc_slide=false → PC 端弹系统浏览器；移动端点开后也是系统浏览器。
+ */
+const dtOpen = url => `dingtalk://dingtalkclient/page/link?url=${encodeURIComponent(url)}&pc_slide=false`;
+
+/** 按平台包装可点击链接：钉钉走 dingtalk://，其它平台直接用 http 链接 */
+const openLink = (type, url) => (type === 'dingtalk' ? dtOpen(url) : url);
+
+/** 素材在网页里的深链（带 ?open=id，点开直接是这条素材的详情抽屉） */
+const videoLink = (cfg, v) => {
+  const base = linkBase(cfg);
+  return base ? `${base}/?open=${v.id}` : '';
+};
+
 /** 公网基础地址（缩略图必须公网可达，钉钉/企微客户端要去拉图） */
 const publicBase = () => settings.getNotify().publicBase || '';
 const thumbUrl = (v, base) => base + '/api/videos/' + v.id + '/thumb';
@@ -166,7 +185,7 @@ function onUpload(videos, uploader) {
   if (cfg.type === 'dingtalk' && thumbs.length) {
     const links = videos.slice(0, 8).map(v => ({
       title: '【' + space + '】' + titleOf(v) + durOf(v),
-      messageURL: streamUrl(v, base),
+      messageURL: openLink(cfg.type, videoLink(cfg, v) || streamUrl(v, base)),
       picURL: thumbUrl(v, base),
     }));
     return sendPayload({ msgtype: 'feedCard', feedCard: { links } });
@@ -175,8 +194,12 @@ function onUpload(videos, uploader) {
   const plain = cfg.type === 'feishu';   // 飞书 text 消息不吃 markdown 和图片
   const lines = videos.slice(0, 5).map(v => {
     const line = `${plain ? '·' : '-'} 《${titleOf(v)}》${durOf(v)}`;
+    const href = openLink(cfg.type, videoLink(cfg, v));
+    // 钉钉 / 企微 markdown 支持 [文字](链接)；飞书 text 只能贴裸链接
+    const linkTxt = !href ? '' : plain ? ` ${href}` : ` [▶ 打开](${href})`;
     // 企业微信 markdown 支持内嵌图片：带公网地址时贴封面缩略图
-    return cfg.type === 'wecom' && thumbs.includes(v) ? line + '\n![' + titleOf(v) + '](' + thumbUrl(v, base) + ')' : line;
+    const thumb = cfg.type === 'wecom' && thumbs.includes(v) ? '\n![' + titleOf(v) + '](' + thumbUrl(v, base) + ')' : '';
+    return line + linkTxt + thumb;
   });
   const more = videos.length > 5 ? `\n…等共 ${videos.length} 条` : '';
   const tip = base ? '' : '\n（配置「公网访问地址」后，钉钉群会直接显示封面缩略图卡片）';
@@ -194,9 +217,13 @@ function onComment({ body, video, author }) {
   if (!cfg.onComment) return;
   const mentions = resolveMentions(body, author?.id);
   const title = video?.title || video?.orig_name || '未命名素材';
+  const href = video ? openLink(cfg.type, videoLink(cfg, video)) : '';
+  // 钉钉/企微用 markdown 链接，飞书 text 贴裸链接（否则会显示成一串 Markdown 源码）
+  const linkLine = !href ? ''
+    : cfg.type === 'feishu' ? `\n${href}` : `\n\n[▶ 打开这条素材](${href})`;
   const text = cfg.type === 'feishu'
-    ? `💬 新评论\n${author?.name || '有人'} 在《${title}》里评论：\n${body}`
-    : `**💬 新评论**\n${author?.name || '有人'} 在《${title}》里评论：\n> ${body}`;
+    ? `💬 新评论\n${author?.name || '有人'} 在《${title}》里评论：\n${body}${linkLine}`
+    : `**💬 新评论**\n${author?.name || '有人'} 在《${title}》里评论：\n> ${body}${linkLine}`;
   return send(text, mentions);
 }
 

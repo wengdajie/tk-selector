@@ -56,5 +56,7 @@ module.exports = {
     onComment: String(process.env.NOTIFY_ON_COMMENT ?? '1') !== '0',
     // 公网访问地址（如 https://tk.example.com）：钉钉缩略图卡片要从公网拉图，内网地址钉钉拉不到
     publicBase: (process.env.NOTIFY_PUBLIC_BASE || '').replace(/\/+$/, ''),
+    // 消息里链接的落点地址（可填内网 IP，手机同 WiFi 时点开更快）
+    linkBase: (process.env.NOTIFY_LINK_BASE || '').replace(/\/+$/, ''),
   },
 };

@@ -1296,6 +1296,10 @@ function renderNotifyPanel(d) {
     value: d.publicBase || '', disabled: !canEdit,
     placeholder: 'https://tk.example.com（不填则只发文字列表）',
   });
+  const linkIn = el('input', {
+    value: d.linkBase || '', disabled: !canEdit,
+    placeholder: 'http://192.168.1.4:8899（不填则用上面的公网地址）',
+  });
   const onUploadCb = el('input', { type: 'checkbox', disabled: !canEdit });
   onUploadCb.checked = d.onUpload !== false;
   const onCommentCb = el('input', { type: 'checkbox', disabled: !canEdit });
@@ -1322,6 +1326,7 @@ function renderNotifyPanel(d) {
       notify_type: typeSel.value,
       notify_url: urlIn.value.trim(),
       notify_public_base: publicIn.value.trim(),
+      notify_link_base: linkIn.value.trim(),
       notify_enabled: !!enabledCb.checked,
       notify_on_upload: !!onUploadCb.checked,
       notify_on_comment: !!onCommentCb.checked,
@@ -1367,6 +1372,11 @@ function renderNotifyPanel(d) {
       el('label', {}, '加签密钥（可选）', srcDot('notify_secret')),
       el('div', { class: 'pw-wrap' }, secretIn),
       el('p', { class: 'sethint' }, '钉钉 / 飞书机器人安全设置选了「加签」时才需要；企业微信机器人不用填。'),
+    ),
+    el('div', { class: 'field' },
+      el('label', {}, '跳转地址（点消息里的链接去哪）', srcDot('notify_link_base')),
+      linkIn,
+      el('p', { class: 'sethint' }, '手机和 NAS 在同一个 WiFi 时，把这个填成内网地址（如 http://192.168.1.4:8899）点开更快；留空则用下面的公网地址。钉钉消息里的链接会自动用系统浏览器打开，不走钉钉内置浏览器。'),
     ),
     el('div', { class: 'field' },
       el('label', {}, '公网访问地址（缩略图卡片需要）', srcDot('notify_public_base')),
