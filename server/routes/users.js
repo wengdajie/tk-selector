@@ -5,6 +5,7 @@ const config = require('../config');
 const { uuid } = require('../lib/util');
 const { hashPassword, verifyPassword } = require('../lib/password');
 const { requireUser, requireAdmin, checkCode } = require('../middleware');
+const mediaauth = require('../lib/mediaauth');
 
 const r = express.Router();
 
@@ -28,7 +29,7 @@ r.get('/users', requireUser, (req, res) => {
 
 r.get('/me', requireUser, (req, res) => {
   const u = db.prepare(`SELECT ${PUBLIC_FIELDS} FROM users WHERE id = ?`).get(req.user.id);
-  res.json({ user: u });
+  res.json({ user: u, mediaToken: mediaauth.issue(u.id) });
 });
 
 /** 注册：名字 + 密码必填，角色限运营/拍摄/只读；管理员只能由管理员创建 */
@@ -114,7 +115,7 @@ r.post('/login', (req, res) => {
   }
   loginFails.delete(key);
   const user = db.prepare(`SELECT ${PUBLIC_FIELDS} FROM users WHERE id = ?`).get(u.id);
-  res.json({ user });
+  res.json({ user, mediaToken: mediaauth.issue(user.id) });
 });
 
 /** 改密码：本人需提供当前密码；管理员可直接重置任意成员 */

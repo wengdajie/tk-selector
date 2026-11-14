@@ -5,8 +5,8 @@ let onUnauthorized = null;
 
 export const getUser = () => user;
 export const storedUid = () => localStorage.getItem(LS_UID);
-export function setUser(u) {
-  user = u;
+export function setUser(u, mediaToken) {
+  user = u ? { ...u, mediaToken: mediaToken || u.mediaToken || null } : null;
   if (u) localStorage.setItem(LS_UID, u.id);
   else localStorage.removeItem(LS_UID);
 }
@@ -39,7 +39,11 @@ export async function api(path, opts = {}) {
 /** 媒体地址：<video>/<img> 无法带 header，用 query 传身份 */
 export function mediaUrl(path, extra = '') {
   const sep = path.includes('?') ? '&' : '?';
-  return path + sep + 'uid=' + encodeURIComponent(user?.id || '') + extra;
+  // 优先签名 token（24h 过期、可吊销）；老会话没有 token 时退回 uid（服务端会拒绝）
+  const idPart = user?.mediaToken
+    ? 't=' + encodeURIComponent(user.mediaToken)
+    : 'uid=' + encodeURIComponent(user?.id || '');
+  return path + sep + idPart + extra;
 }
 
 // ---- 上传（带进度）----

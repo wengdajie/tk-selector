@@ -8,7 +8,7 @@ const config = require('../config');
 const media = require('../lib/media');
 const notify = require('../lib/notify');
 const { ingest } = require('../lib/store');
-const { requireUser } = require('../middleware');
+const { requireUser, requireAdmin } = require('../middleware');
 const { uuid, ymd, safeName } = require('../lib/util');
 const { STAGES, STAGE_KEYS, DIMS, normalizeScores, contentScore, normStage } = require('../lib/scoring');
 
@@ -168,9 +168,9 @@ r.get('/videos/:id/play', requireUser, async (req, res) => {
   const abs = path.join(config.mediaDir, v.file_path);
   if (!fs.existsSync(abs)) return res.status(410).json({ error: '源文件已被移动或删除' });
   const proxy = require('../lib/proxy');
-  // 首次播放：轻等 25 秒（17 秒的 1080p60 片子约 10-30 秒转完），转不出来就先给原片
+  // 首次播放：最多等 4 秒，否则先发原片并告诉前端「正在转码」（前端会自动重试）
   if (!proxy.isReady(v.id) && proxy.needsProxy(v)) {
-    await proxy.queue(v.id, { maxWaitMs: 25000 });
+    await proxy.queue(v.id, { maxWaitMs: 4000 });
   }
   if (proxy.isReady(v.id)) {
     res.setHeader('Content-Type', 'video/mp4');
@@ -181,14 +181,15 @@ r.get('/videos/:id/play', requireUser, async (req, res) => {
   res.setHeader('Content-Type', v.mime);
   res.setHeader('Cache-Control', 'private, max-age=3600');
   res.setHeader('X-Play-Source', 'original');
+  if (proxy.needsProxy(v)) res.setHeader('X-Proxy-Pending', '1');   // 前端据此继续重试
   return res.sendFile(abs);
 });
 
 /** 手动触发/排队播放版转码 */
-r.post('/videos/:id/proxy', requireUser, (req, res) => {
+r.post('/videos/:id/proxy', requireUser, requireAdmin, (req, res) => {
   const v = db.prepare('SELECT id FROM videos WHERE id = ?').get(req.params.id);
   if (!v) return res.status(404).json({ error: '视频不存在' });
-  require('../lib/proxy').queue(v.id).catch(() => {});
+  require('../lib/proxy').queue(v.id, { force: true }).catch(() => {});
   res.json({ ok: true, queued: true });
 });
 
@@ -305,6 +306,8 @@ r.delete('/videos/:id', requireUser, (req, res) => {
   for (const rel of [v.file_path, v.thumb_path].filter(Boolean)) {
     try { fs.unlinkSync(path.join(config.mediaDir, rel)); } catch { /* ignore */ }
   }
+  // 播放版（代理）跟着一起删，否则磁盘只增不减
+  try { require('../lib/proxy').dropOne(v.id); } catch { /* ignore */ }
   res.json({ ok: true });
 });
 

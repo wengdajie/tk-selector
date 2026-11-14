@@ -169,7 +169,8 @@ const env = {
   AI_API_KEY: 'sk-mock-key',
   AI_MODEL: 'mock-vision',
   AI_FRAMES: '4',
-  AI_TIMEOUT_MS: '300000',   // v1.9.0 默认放宽到 5 分钟（慢模型拆解不再 120s 超时）
+  AI_TIMEOUT_MS: '300000',
+  PROXY_TIMEOUT_MS: '6000',   // v1.9.0 默认放宽到 5 分钟（慢模型拆解不再 120s 超时）
 };
 fs.mkdirSync(path.join(tmp, 'data'), { recursive: true });
 fs.mkdirSync(path.join(tmp, 'watch'), { recursive: true });
@@ -216,6 +217,8 @@ const call = async (p, { method = 'GET', body, uid } = {}) => {
 const login = await call('/login', { method: 'POST', body: { name: '管理员', password: 'tkadmin2026' } });
 ok(login.status === 200, '管理员登录', String(login.status));
 const uid = login.data.user?.id;
+const meForToken = await call('/me', { uid });
+const mediaToken = meForToken.data?.mediaToken || '';
 
 const fd = new FormData();
 fd.append('files', new Blob([fs.readFileSync(sample)], { type: 'video/mp4' }), 'sample.mp4');
@@ -276,7 +279,7 @@ ok((seen[0]?.prompt || '').includes('"setup"'), '提示词要求给出拍摄设�
 
 ok(Array.isArray(detail?.frames) && detail.frames.length === 4, '抽出 4 张关键帧（AI_FRAMES=4）', String(detail?.frames?.length));
 ok((detail?.frames || []).every(f => typeof f.t === 'number' && f.path), '关键帧带时间码与路径');
-const f0 = await fetch(`${BASE}/api/scripts/${sid}/frames/0?uid=${uid}`);
+const f0 = await fetch(`${BASE}/api/scripts/${sid}/frames/0?t=${mediaToken}`);
 const fbuf = Buffer.from(await f0.arrayBuffer());
 ok(f0.status === 200 && (f0.headers.get('content-type') || '').includes('image'), '关键帧可访问', String(f0.status));
 ok(fbuf.length > 3000, '关键帧是真实图片', fbuf.length + 'B');
@@ -397,7 +400,7 @@ const wdb = new Database(path.join(env.DATA_DIR, 'app.db'));
 const origFrames = wdb.prepare('SELECT frames FROM scripts WHERE id = ?').get(sid2).frames;
 wdb.prepare('UPDATE scripts SET frames = ? WHERE id = ?')
   .run(JSON.stringify([{ t: 1, path: 'frames/../../server/db.js' }]), sid2);
-const trav = await fetch(`${BASE}/api/scripts/${sid2}/frames/0?uid=${uid}`);
+const trav = await fetch(`${BASE}/api/scripts/${sid2}/frames/0?t=${mediaToken}`);
 ok(trav.status === 404, '关键帧路径含 .. 时拒绝返回文件', String(trav.status));
 wdb.prepare('UPDATE scripts SET frames = ? WHERE id = ?').run(origFrames, sid2);
 
@@ -825,6 +828,118 @@ ok(buf.subarray(0, 2048).includes(Buffer.from('moov')) || buf.subarray(0, 1024 *
   '播放版是 faststart（moov 在前 1MB 内）');
 ok(buf.length > 1000, '播放版文件非空', String(buf.length));
 wdb2.close();
+
+
+const uuidv4Like = () => crypto.randomUUID();
+const ymdLocal = () => new Date().toISOString().slice(0, 10);
+/* ---------------- v1.11 媒体令牌与代理健壮性 ---------------- */
+console.log('\n== v1.11 媒体令牌 ==');
+ok(!!mediaToken, '/me 下发媒体令牌', String(mediaToken).slice(0, 12) + '…');
+const onlyUid = await fetch(`${BASE}/api/videos/${pv}/play?uid=${uid}`);
+ok(onlyUid.status === 401, '旧式「裸 uid」链接被拒（防转发泄露）', String(onlyUid.status));
+try { await onlyUid.body?.cancel?.(); } catch { /* ignore */ }
+const withTok = await fetch(`${BASE}/api/videos/${pv}/play?t=${encodeURIComponent(mediaToken)}`);
+ok(withTok.status === 200 || withTok.status === 206, '签名令牌可访问媒体', String(withTok.status));
+try { await withTok.body?.cancel?.(); } catch { /* ignore */ }
+const badTok = await fetch(`${BASE}/api/videos/${pv}/play?t=${encodeURIComponent(mediaToken.slice(0, -3) + 'abc')}`);
+ok(badTok.status === 401, '篡改令牌被拒', String(badTok.status));
+try { await badTok.body?.cancel?.(); } catch { /* ignore */ }
+
+console.log('\n== v1.11 代理健壮性 ==');
+// 3) 删除素材 → 播放版文件一并删除（磁盘不再泄漏）
+const delSample = mkSample('qc-del.mp4', '300x500', 1.3);
+const delFd = new FormData();
+delFd.append('files', new Blob([fs.readFileSync(delSample)], { type: 'video/mp4' }), 'del.mp4');
+delFd.append('space', 'daily');
+delFd.append('title', '删除级联验证');
+const delRes = await (await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: delFd })).json();
+const delId = delRes.items?.[0]?.id;
+ok(!!delId, '上传删除级联验证素材');
+{
+  // 小样片是 H.264 轻片会被「无需转码」跳过 → 标成 HEVC 强制走转码，验证删除级联
+  const wdbDel = new Database(path.join(env.DATA_DIR, 'app.db'));
+  wdbDel.prepare("UPDATE videos SET codec='hevc', pix_fmt='yuv420p10le', width=1080, height=1920, proxy_state=NULL WHERE id=?").run(delId);
+  wdbDel.close();
+}
+await call('/videos/' + delId + '/proxy', { method: 'POST', uid });
+let delProxy = '';
+for (let i = 0; i < 40; i++) {
+  await sleep(700);
+  const d = await call('/videos/' + delId, { uid });
+  delProxy = d.data?.video?.proxy_state || '';
+  if (delProxy === 'done' || delProxy === 'failed') break;
+}
+ok(delProxy === 'done', '转码完成（删除前）', delProxy);
+const proxyPathAfter = path.join(env.DATA_DIR, 'media', 'proxies', delId + '.mp4');
+ok(fs.existsSync(proxyPathAfter), '播放版文件存在');
+await call('/videos/' + delId, { method: 'DELETE', uid });
+ok(!fs.existsSync(proxyPathAfter), '删除素材后播放版文件被清理（不再泄漏磁盘）');
+
+// 4) done 但文件丢了 → /play 应重新转（不再固定等满超时）
+const wdb3 = new Database(path.join(env.DATA_DIR, 'app.db'));
+const lostRow = wdb3.prepare("SELECT id FROM videos WHERE proxy_state='done' LIMIT 1").get();
+const lostId = lostRow?.id;
+ok(!!lostId, '找到一条已完成转码的素材');
+const lostPath = path.join(env.DATA_DIR, 'media', 'proxies', lostId + '.mp4');
+fs.rmSync(lostPath, { force: true });
+wdb3.close();
+const t0lost = Date.now();
+const relost = await fetch(`${BASE}/api/videos/${lostId}/play?t=${encodeURIComponent(mediaToken)}`);
+const costLost = Date.now() - t0lost;
+const srcLost = relost.headers.get('x-play-source');
+ok((srcLost === 'original' || srcLost === 'proxy') && costLost < 8000,
+  '文件缺失时不再固定等 25 秒（≤8s 内给出响应）', `${srcLost} ${costLost}ms`);
+if (srcLost === 'original') {
+  ok(relost.headers.get('x-proxy-pending') === '1', '发原片时告知前端「转码中」', relost.headers.get('x-proxy-pending'));
+}
+try { await relost.body?.cancel?.(); } catch { /* ignore */ }
+let reformed = false;
+for (let i = 0; i < 40; i++) {
+  await sleep(700);
+  if (fs.existsSync(lostPath)) { reformed = true; break; }
+}
+ok(reformed, '缺失的播放版会自动重转（状态不会卡在 done）');
+
+// 5) 坏文件：转码失败但不能堵住队列
+const badId = uuidv4Like();
+const badRel = 'daily/' + ymdLocal() + '/' + badId + '.mp4';
+const badAbs = path.join(env.DATA_DIR, 'media', badRel);
+fs.mkdirSync(path.dirname(badAbs), { recursive: true });
+fs.writeFileSync(badAbs, Buffer.alloc(2048, 7));   // 垃圾字节，ffmpeg 必失败
+const wdb4 = new Database(path.join(env.DATA_DIR, 'app.db'));
+wdb4.prepare(`INSERT INTO videos (id,space,title,orig_name,file_path,mime,size,duration,width,height,
+  shoot_date,source,uploader_id,status,tags,dedupe_key,created_at,updated_at,codec,pix_fmt,fps,has_audio,qc_status,proxy_state)
+  VALUES (?, 'daily','坏文件验证','bad.mp4',?,'video/mp4',2048,5,1080,1920,?,'upload',?,'new','',?,?,?,'hevc','yuv420p10le',30,1,'skipped','pending')`)
+  .run(badId, badRel, ymdLocal(), uid, 'bad-' + badId, Date.now(), Date.now());
+wdb4.close();
+await call('/videos/' + badId + '/proxy', { method: 'POST', uid });   // 触发队列
+let badState = '';
+for (let i = 0; i < 40; i++) {
+  await sleep(800);
+  const d = await call('/videos/' + badId, { uid });
+  badState = d.data?.video?.proxy_state || '';
+  if (badState === 'failed') break;
+}
+ok(badState === 'failed', '坏文件转码失败并标记 failed（不会永久 running）', badState);
+// 队列继续工作：再触发一条正常素材，应能转完
+const afterId = pv;
+fs.rmSync(path.join(env.DATA_DIR, 'media', 'proxies', afterId + '.mp4'), { force: true });
+await call('/videos/' + afterId + '/proxy', { method: 'POST', uid });
+let afterDone = false;
+for (let i = 0; i < 40; i++) {
+  await sleep(800);
+  if (fs.existsSync(path.join(env.DATA_DIR, 'media', 'proxies', afterId + '.mp4'))) { afterDone = true; break; }
+}
+ok(afterDone, '坏文件之后队列仍能继续转（未被堵死）');
+
+// 6) 没配任何地址时不应产生空链接
+await call('/settings/notify', { method: 'PUT', uid, body: { notify_public_base: '', notify_link_base: '', notify_on_comment: true } });
+const beforeCnt = feedHooks.length;
+await call('/videos/' + pv + '/comments', { method: 'POST', uid, body: { body: '空链接兜底验证' } });
+await sleep(800);
+const emptyMsg = String(feedHooks.at(-1)?.body?.markdown?.text || '');
+ok(feedHooks.length > beforeCnt, '仍能推送（只是没链接）', String(feedHooks.length));
+ok(!emptyMsg.includes('url=&'), '未配地址时不生成空链接', emptyMsg.slice(-80));
 
 /* ---------------- 静态资源一致性（防 UI 路径回归） ---------------- */
 console.log('\n== 静态资源一致性 ==');

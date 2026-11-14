@@ -136,7 +136,7 @@ async function init() {
     try {
       const r = await api('/me', { headers: { 'x-user-id': uid } });
       const view = params.get('view');
-      enterApp(r.user, VIEW_META[view] ? view : 'dashboard');
+      enterApp(r.user, VIEW_META[view] ? view : 'dashboard', r.mediaToken);
       const openId = params.get('open');
       if (openId) setTimeout(() => openVideo(openId), 400);
       const scriptId = params.get('script');
@@ -196,7 +196,7 @@ function bindAuth() {
     btn.textContent = '登录中…';
     try {
       const r = await api('/login', { method: 'POST', body: { name, password } });
-      enterApp(r.user, 'dashboard');
+      enterApp(r.user, 'dashboard', r.mediaToken);
       toast(`欢迎回来，${r.user.name}`);
     } catch (ex) {
       err.textContent = ex.message;
@@ -224,7 +224,7 @@ function bindAuth() {
     btn.textContent = '创建中…';
     try {
       const r = await api('/users', { method: 'POST', body: { name, role, password } });
-      enterApp(r.user, 'dashboard');
+      enterApp(r.user, 'dashboard', r.mediaToken);
       toast('账号已创建，欢迎加入');
     } catch (ex) {
       err.textContent = ex.message;
@@ -268,8 +268,8 @@ function showAuth() {
   setTimeout(() => document.getElementById('loginName')?.focus(), 120);
 }
 
-function enterApp(user, view = 'dashboard') {
-  setUser(user);
+function enterApp(user, view = 'dashboard', mediaToken = null) {
+  setUser(user, mediaToken);
   S.user = user;
   if (!S.date) S.date = ymd();
   applyRoleUi();

@@ -156,6 +156,7 @@ function show(idx, first = false) {
   F.video.src = mediaUrl(`/api/videos/${v.id}/play`);
   F.video.muted = F.muted;
   F.video.play?.().catch(() => { F.video.muted = true; F.muted = true; F.video.play?.().catch(() => {}); });
+  resetRetry();
   F.counter.textContent = `${idx + 1} / ${F.list.length}`;
   renderMask(v);
   if (!first) toast(dirLabel());   // 切换提示
@@ -164,11 +165,22 @@ function show(idx, first = false) {
 const dirLabel = () => '';
 
 let retryTimer = null;
-let retryLeft = 3;
-/** 首次播放时服务端可能正在生成 H.264 播放版（原片 HEVC 浏览器解不了）→ 自动重试几次 */
+let retryLeft = 0;
+const RETRY_DELAYS = [4000, 6000, 9000, 13000, 18000];   // 总共约 50 秒，够长片转完
+/** 切换视频/重新打开时重置重试预算，避免「上一个视频用完了，后面的都不重试」 */
+function resetRetry() {
+  retryLeft = 0;
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+}
+/** 首次播放时服务端可能正在生成 H.264 播放版（原片 HEVC 浏览器解不了）→ 退避重试 */
 function retryPlay() {
-  if (!F || retryLeft <= 0) return;
-  retryLeft--;
+  if (!F) return;
+  if (retryLeft >= RETRY_DELAYS.length) {
+    toast('这条还在转码，稍后刷新再试', 'err');
+    return;
+  }
+  const delay = RETRY_DELAYS[retryLeft];
+  retryLeft++;
   if (retryTimer) clearTimeout(retryTimer);
   toast('正在生成流畅播放版，稍等…');
   retryTimer = setTimeout(() => {
@@ -177,7 +189,7 @@ function retryPlay() {
     if (!v) return;
     F.video.src = mediaUrl('/api/videos/' + v.id + '/play') + '&_r=' + Date.now();
     F.video.play?.().catch(() => {});
-  }, 4000);
+  }, delay);
 }
 
 function togglePlay() {
@@ -247,7 +259,8 @@ function renderMask(v) {
         } catch (e) { toast(e.message, 'err'); }
       } }),
     railBtn(svgIcon(P.share), null, { title: '复制分享文案', onClick: async () => {
-      const link = location.origin + mediaUrl(`/api/videos/${v.id}/stream`);
+      // 只发「需要登录」的深链，不发带身份令牌的直链
+      const link = `${location.origin}/?open=${encodeURIComponent(v.id)}`;
       const text = `《${v.title || v.orig_name || '未命名'}》 ${link}`;
       toast(await copyText(text) ? '分享文案已复制' : '复制失败');
     } }),

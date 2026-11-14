@@ -131,7 +131,7 @@ const linkBase = cfg => cfg.linkBase || cfg.publicBase || '';
 const dtOpen = url => `dingtalk://dingtalkclient/page/link?url=${encodeURIComponent(url)}&pc_slide=false`;
 
 /** 按平台包装可点击链接：钉钉走 dingtalk://，其它平台直接用 http 链接 */
-const openLink = (type, url) => (type === 'dingtalk' ? dtOpen(url) : url);
+const openLink = (type, url) => (!url ? '' : type === 'dingtalk' ? dtOpen(url) : url);
 
 /** 素材在网页里的深链（带 ?open=id，点开直接是这条素材的详情抽屉） */
 const videoLink = (cfg, v) => {
