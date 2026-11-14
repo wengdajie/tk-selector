@@ -941,6 +941,31 @@ const emptyMsg = String(feedHooks.at(-1)?.body?.markdown?.text || '');
 ok(feedHooks.length > beforeCnt, '仍能推送（只是没链接）', String(feedHooks.length));
 ok(!emptyMsg.includes('url=&'), '未配地址时不生成空链接', emptyMsg.slice(-80));
 
+/* ---------------- v1.11.1 下载/导出链接也要令牌 ---------------- */
+console.log('\n== v1.11.1 下载链接令牌 ==');
+const dlVid = pv;
+const batch = await call('/downloads', { method: 'POST', uid, body: { videoIds: [dlVid], note: '令牌验证' } });
+ok([200, 201].includes(batch.status) && !!batch.data?.downloadUrl, '创建下载批次', String(batch.status));
+const dlUrl = batch.data?.downloadUrl || '';
+
+const dlBare = await fetch(BASE + dlUrl + '?uid=' + uid);
+ok(dlBare.status === 401, '下载链接泄露的裸 uid 被拒', String(dlBare.status));
+try { await dlBare.body?.cancel?.(); } catch { /* ignore */ }
+
+const dlTok = await fetch(`${BASE}${dlUrl}?t=${encodeURIComponent(mediaToken)}`);
+ok(dlTok.status === 200, '带令牌可正常下载', String(dlTok.status));
+const dlType = dlTok.headers.get('content-type') || '';
+ok(/zip|octet-stream|video\/mp4/.test(dlType), '下载返回文件（单条直接发原片 / 多条打 zip）', dlType);
+try { await dlTok.body?.cancel?.(); } catch { /* ignore */ }
+
+const csvBare = await fetch(BASE + '/api/export.csv?ids=' + dlVid + '&uid=' + uid);
+ok(csvBare.status === 401, '导出 CSV 裸 uid 被拒', String(csvBare.status));
+try { await csvBare.body?.cancel?.(); } catch { /* ignore */ }
+const csvTok = await fetch(`${BASE}/api/export.csv?ids=${dlVid}&t=${encodeURIComponent(mediaToken)}`);
+ok(csvTok.status === 200, '导出 CSV 带令牌可用', String(csvTok.status));
+const csvBody = await csvTok.text();
+ok(csvBody.includes(',') && csvBody.split('\n').length >= 2, 'CSV 内容非空', csvBody.slice(0, 40));
+
 /* ---------------- 静态资源一致性（防 UI 路径回归） ---------------- */
 console.log('\n== 静态资源一致性 ==');
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');

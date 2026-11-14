@@ -568,7 +568,7 @@ function renderFilterBar() {
 
 /** 按当前筛选条件导出 CSV */
 function exportCurrent() {
-  const p = new URLSearchParams({ space: S.space, uid: S.user.id });
+  const p = new URLSearchParams({ space: S.space });
   if (S.from) p.set('from', S.from);
   if (S.to) p.set('to', S.to);
   if (!S.from && !S.to && S.date) p.set('date', S.date);
@@ -578,7 +578,7 @@ function exportCurrent() {
   if (S.filter === 'starred') p.set('starred', '1');
   if (S.filter === 'star4') p.set('minRating', '4');
   const a = document.createElement('a');
-  a.href = '/api/export.csv?' + p;
+  a.href = mediaUrl('/api/export.csv?' + p);   // 带签名令牌
   a.rel = 'noopener';
   document.body.append(a);
   a.click();
@@ -2347,7 +2347,7 @@ async function onBulkAction(e) {
     return;
   }
   if (act === 'export') {
-    const url = `/api/export.csv?ids=${ids.join(',')}&uid=${encodeURIComponent(S.user.id)}`;
+    const url = mediaUrl(`/api/export.csv?ids=${ids.join(',')}`);
     const a = document.createElement('a');
     a.href = url;
     a.rel = 'noopener';
@@ -2366,7 +2366,7 @@ async function doDownload(ids, note = '') {
   try {
     toast(ids.length > 1 ? `正在打包 ${ids.length} 条素材…` : '开始下载…', 'ok', 1800);
     const r = await api('/downloads', { method: 'POST', body: { videoIds: ids, note } });
-    const url = r.downloadUrl + '?uid=' + encodeURIComponent(S.user.id);
+    const url = mediaUrl(r.downloadUrl);   // 带签名令牌（裸 uid 已被服务端拒绝）
     const a = document.createElement('a');
     a.href = url;
     a.rel = 'noopener';
