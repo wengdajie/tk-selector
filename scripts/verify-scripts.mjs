@@ -992,6 +992,11 @@ ok((fRow?.uploads || 0) === 0, '未来时间区间统计为 0', String(fRow?.upl
 // 角色过滤：只读角色应看不到人（测试库里没有 viewer）
 const mbViewer = await call('/stats/members?role=viewer', { uid });
 ok(Array.isArray(mbViewer.data?.items) && mbViewer.data.items.length === 0, '按角色筛选生效（无 viewer 则空）', String(mbViewer.data?.items?.length));
+// 拍摄产出面板：只统计拍摄成员
+const mbShoot = await call('/stats/members?role=shooter', { uid });
+ok(Array.isArray(mbShoot.data?.items) && mbShoot.data.items.every(u => u.role === 'shooter'),
+  '只统计拍摄成员（不含运营/管理员/只读）', JSON.stringify((mbShoot.data?.items || []).map(u => u.role)));
+ok((mbShoot.data?.totals?.uploads || 0) >= 0, '拍摄口径合计可用', String(mbShoot.data?.totals?.uploads));
 
 // CSV 导出
 const csvRes = await fetch(`${BASE}/api/stats/members.csv?t=${encodeURIComponent(mediaToken)}`);

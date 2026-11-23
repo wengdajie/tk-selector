@@ -742,8 +742,19 @@ function dimsPanel() {
           el('span', { class: 'dist-num' }, d.avg == null ? '—' : String(d.avg)),
         )),
       )
-    : emptyState({ icon: '★', title: '还没有维度评分', message: '打开素材详情，拖动 5 个滑块打分，这里会显示各维度均分' });
+    : el('div', { class: 'po-hint', style: { padding: '6px 0 2px' } }, '还没有维度评分 · 打开素材详情拖动 5 个滑块打分，这里会显示各维度均分');
   return panel('内容评分维度', '0-10 分，看清团队短板', body);
+}
+
+/** 仪表盘分组标题 */
+function dashSection(title, sub, ...children) {
+  return el('section', { class: 'dash-sec' },
+    el('div', { class: 'dash-sec-head' },
+      el('h3', {}, title),
+      sub ? el('span', {}, sub) : null,
+    ),
+    ...children,
+  );
 }
 
 function renderDashboard(d) {
@@ -940,12 +951,18 @@ function renderDashboard(d) {
       el('b', {}, String(val)), el('span', {}, label))),
   );
 
-  root.append(el('div', { class: 'dash-cols' }, trendPanel, distPanel));
-  root.append(el('div', { class: 'dash-cols' }, panel('高分素材榜', '按评分排序', topBody), panel('团队活跃度', '评论 + 下载 + 评分 + 上传 + 认领', teamBody)));
-  root.append(el('div', { class: 'dash-cols' }, pipelinePanel(), dimsPanel()));
-  root.append(el('div', { class: 'dash-cols' }, panel('需求概览', '状态分布', reqBody), panel('最近动态', '实时联动', feedBody)));
-  root.append(membersPanel());
-  root.append(panel('我的贡献', '登录至今的累计数据', mineBody));
+  // 拍摄产出：紧跟 KPI，只统计拍摄成员入片数量
+  root.append(dashSection('拍摄产出', '谁这个月拍得多，一眼看清', membersPanel()));
+
+  root.append(dashSection('内容与流水线', '入库趋势、评分分布、筛选推进', 
+    el('div', { class: 'dash-cols' }, trendPanel, distPanel),
+    el('div', { class: 'dash-cols' }, pipelinePanel(), dimsPanel())));
+
+  root.append(dashSection('团队协作', '榜单、活跃度、需求与动态',
+    el('div', { class: 'dash-cols' }, panel('高分素材榜', '按评分排序', topBody), panel('团队活跃度', '评论 + 下载 + 评分 + 上传 + 认领', teamBody)),
+    el('div', { class: 'dash-cols' }, panel('需求概览', '状态分布', reqBody), panel('最近动态', '实时联动', feedBody))));
+
+  root.append(dashSection('我的贡献', '登录至今的累计数据，只对你自己可见', el('section', { class: 'panel-card' }, mineBody)));
 
   view.append(root);
 }
@@ -3252,178 +3269,92 @@ document.addEventListener('keydown', e => {
 });
 
 
-/* ========================= 成员工作量（业绩分析） ========================= */
-const MEMBER_PRESETS = [
-  ['week', '本周'],
-  ['month', '本月'],
-  ['last', '上月'],
-  ['30d', '近 30 天'],
-  ['all', '全部'],
-];
-const MEMBER_ROLES = [['all', '全部角色'], ['shooter', '拍摄'], ['ops', '运营'], ['admin', '管理员'], ['viewer', '只读']];
 
-/** 预设 → { from, to }（YYYY-MM-DD） */
-function memberRange(preset, from, to) {
-  const p2 = n => String(n).padStart(2, '0');
-  const fmt = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+/* ========================= 拍摄产出（只统计拍摄成员的入片数量） ========================= */
+const SHOOT_PRESETS = [['today', '今日'], ['week', '本周'], ['month', '本月'], ['last', '上月'], ['30d', '近 30 天'], ['all', '全部']];
+
+const p2d = n => String(n).padStart(2, '0');
+const fmtDay = d => `${d.getFullYear()}-${p2d(d.getMonth() + 1)}-${p2d(d.getDate())}`;
+
+/** 时间预设 → { from, to } */
+function shootRange(preset) {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  if (preset === 'custom') return { from: from || '', to: to || '' };
   if (preset === 'all') return { from: '', to: '' };
+  if (preset === 'today') return { from: fmtDay(today), to: fmtDay(today) };
   if (preset === 'week') {
-    const dow = (today.getDay() + 6) % 7;   // 周一为一周起点
-    const start = new Date(today); start.setDate(today.getDate() - dow);
-    return { from: fmt(start), to: fmt(today) };
+    const dow = (today.getDay() + 6) % 7;          // 周一为一周起点
+    const start = new Date(today);
+    start.setDate(today.getDate() - dow);
+    return { from: fmtDay(start), to: fmtDay(today) };
   }
-  if (preset === 'month') {
-    return { from: fmt(new Date(today.getFullYear(), today.getMonth(), 1)), to: fmt(today) };
-  }
+  if (preset === 'month') return { from: fmtDay(new Date(today.getFullYear(), today.getMonth(), 1)), to: fmtDay(today) };
   if (preset === 'last') {
-    const first = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-    const last = new Date(today.getFullYear(), today.getMonth(), 0);
-    return { from: fmt(first), to: fmt(last) };
+    return {
+      from: fmtDay(new Date(today.getFullYear(), today.getMonth() - 1, 1)),
+      to: fmtDay(new Date(today.getFullYear(), today.getMonth(), 0)),
+    };
   }
-  // 30d
-  const start = new Date(today); start.setDate(today.getDate() - 29);
-  return { from: fmt(start), to: fmt(today) };
+  const start = new Date(today);
+  start.setDate(today.getDate() - 29);
+  return { from: fmtDay(start), to: fmtDay(today) };
 }
 
-const fmtDur2 = sec => {
-  const t = Math.round(Number(sec) || 0);
-  if (t <= 0) return '—';
-  if (t < 60) return `${t}s`;
-  const m = Math.round(t / 60);
-  return m >= 60 ? `${(m / 60).toFixed(1)}h` : `${m}m`;
-};
-const fmtGB = bytes => {
-  const b = Number(bytes) || 0;
-  if (b <= 0) return '—';
-  if (b < 1048576) return `${Math.round(b / 1024)}K`;
-  const g = b / 1073741824;
-  return g >= 1 ? `${g.toFixed(1)}G` : `${Math.round(b / 1048576)}M`;
-};
-
-const MEMBER_COLS = [
-  { k: 'name', label: '成员', sortable: true },
-  { k: 'uploads', label: '素材', sortable: true, hint: '入库条数' },
-  { k: 'durationSec', label: '时长', sortable: true, hint: '素材总时长' },
-  { k: 'sizeBytes', label: '体积', sortable: true },
-  { k: 'picked', label: '入选', sortable: true },
-  { k: 'final', label: '定稿', sortable: true },
-  { k: 'avgRating', label: '平均分', sortable: true, hint: '其素材被评分均值' },
-  { k: 'downloadsReceived', label: '被下载', sortable: true, hint: '别人下载他素材的次数 = 被需要程度' },
-  { k: 'downloadsMade', label: '下载', sortable: true },
-  { k: 'comments', label: '评论', sortable: true },
-  { k: 'claims', label: '认领', sortable: true, hint: '认领的需求数' },
-];
-
 function membersPanel() {
-  if (!S.members) {
-    S.members = { preset: 'month', from: '', to: '', space: 'all', role: 'all', sortKey: 'uploads', sortDir: 'desc' };
-  }
-  const st = S.members;
-  const body = el('div', { class: 'mb-body' });
-  const wrap = panel('成员工作量', '按时间 / 空间 / 角色筛选 · 点表头排序 · 可用于业绩评估', body);
-
-  const kv = (label, value) => el('div', {}, el('b', {}, value), el('span', {}, label));
+  if (!S.shoot) S.shoot = { preset: 'month' };
+  const st = S.shoot;
+  const body = el('div', { class: 'po-body' });
+  const wrap = el('section', { class: 'panel-card' });   // 分组已有标题，卡片不再重复
   let data = null;
 
-  const paintTable = () => {
+  const paint = () => {
     body.innerHTML = '';
     if (!data) { body.append(el('div', { class: 'mb-empty' }, '加载中…')); return; }
-    applyFilters(data);
+    const items = data.items || [];
+    const total = data.totals?.uploads || 0;
+    const max = Math.max(1, ...items.map(u => u.uploads));
+    const top = items[0];
 
-    // 顶部汇总
-    const t = data.totals;
-    body.append(el('div', { class: 'mb-sum' },
-      kv('素材', `${t.uploads} 条`),
-      kv('总时长', fmtDur2(t.durationSec)),
-      kv('入选 / 定稿', `${t.picked} / ${t.final}`),
-      kv('总体积', fmtGB(t.sizeBytes)),
-      kv('平均分', t.avgRating == null ? '—' : String(t.avgRating)),
-      kv('人均素材', data.items.length ? (t.uploads / data.items.length).toFixed(1) : '0'),
+    body.append(el('div', { class: 'po-sum' },
+      sumItem(String(total), '合计入片'),
+      sumItem(items.length ? (total / items.length).toFixed(1) : '0', '人均条数'),
+      sumItem(top && top.uploads ? `${top.uploads}` : '—', top && top.uploads ? `最高 · ${top.name}` : '最高'),
+      sumItem(data.from ? `${data.from.slice(5)} ~ ${data.to.slice(5)}` : '全部时间', '统计区间'),
     ));
 
-    const maxUp = Math.max(1, ...data.items.map(u => u.uploads));
-    const table = el('table', { class: 'mb-tbl' });
-    const thead = el('thead', {}, el('tr', {},
-      ...MEMBER_COLS.map(c => el('th', {
-        class: c.sortable ? 'sortable' + (st.sortKey === c.k ? ' on' : '') : '',
-        title: c.hint || '',
-        onclick: c.sortable ? () => {
-          if (st.sortKey === c.k) st.sortDir = st.sortDir === 'desc' ? 'asc' : 'desc';
-          else { st.sortKey = c.k; st.sortDir = 'desc'; }
-          paintTable();
-        } : null,
-      }, c.label, st.sortKey === c.k ? el('i', { class: 'mb-arrow' }, st.sortDir === 'desc' ? '↓' : '↑') : null)),
-    ));
+    if (!items.length) {
+      body.append(el('div', { class: 'mb-empty' }, '还没有拍摄成员，或这段时间没有入片'));
+      return;
+    }
 
-    const rows = [...data.items].sort((a, b) => {
-      const k = st.sortKey;
-      let av = a[k], bv = b[k];
-      if (k === 'name') { av = String(av); bv = String(bv); return st.sortDir === 'desc' ? a.name.localeCompare(b.name) * -1 : a.name.localeCompare(b.name); }
-      av = av == null ? -Infinity : Number(av);
-      bv = bv == null ? -Infinity : Number(bv);
-      return st.sortDir === 'desc' ? bv - av : av - bv;
-    });
+    body.append(el('div', { class: 'po-list' }, ...items.map((u, i) => el('div', { class: 'po-row' },
+      el('span', { class: 'po-rank' + (i < 3 ? ' top' : '') }, String(i + 1)),
+      avatarMini(u.name, u.color || '#5A6376'),
+      el('b', { class: 'po-name', title: u.name }, u.name),
+      el('div', { class: 'po-bar' }, el('i', { style: { width: (u.uploads / max * 100) + '%' } })),
+      el('span', { class: 'po-count' }, String(u.uploads)),
+      el('span', { class: 'po-unit' }, '条'),
+    ))));
 
-    const tbody = el('tbody', {}, ...rows.map((u, i) => el('tr', { class: i === 0 && st.sortKey === 'uploads' && st.sortDir === 'desc' && u.uploads > 0 ? 'top' : '' },
-      el('td', { class: 'mb-name' },
-        el('span', { class: 'mb-rank' }, String(i + 1)),
-        avatarMini(u.name, u.color || '#5A6376'),
-        el('b', {}, u.name),
-        el('em', {}, roleLabel(u.role))),
-      el('td', { class: 'num' },
-        el('b', {}, String(u.uploads)),
-        el('span', { class: 'mb-mini' }, el('i', { style: { width: (u.uploads / maxUp * 100) + '%' } }))),
-      el('td', { class: 'num' }, fmtDur2(u.durationSec)),
-      el('td', { class: 'num' }, fmtGB(u.sizeBytes)),
-      el('td', { class: 'num' }, String(u.picked)),
-      el('td', { class: 'num' }, String(u.final)),
-      el('td', { class: 'num' }, u.avgRating == null ? '—' : String(u.avgRating)),
-      el('td', { class: 'num' }, String(u.downloadsReceived)),
-      el('td', { class: 'num' }, String(u.downloadsMade)),
-      el('td', { class: 'num' }, String(u.comments)),
-      el('td', { class: 'num' }, u.claims ? `${u.claims}${u.claimsDone ? `（完成 ${u.claimsDone}）` : ''}` : '0'),
-    )));
-
-    const tfoot = el('tfoot', {}, el('tr', {},
-      el('td', { class: 'mb-name' }, el('b', {}, '合计')),
-      el('td', { class: 'num' }, String(t.uploads)),
-      el('td', { class: 'num' }, fmtDur2(t.durationSec)),
-      el('td', { class: 'num' }, fmtGB(t.sizeBytes)),
-      el('td', { class: 'num' }, String(t.picked)),
-      el('td', { class: 'num' }, String(t.final)),
-      el('td', { class: 'num' }, t.avgRating == null ? '—' : String(t.avgRating)),
-      el('td', { class: 'num' }, String(t.downloadsReceived)),
-      el('td', { class: 'num' }, String(t.downloadsMade)),
-      el('td', { class: 'num' }, String(t.comments)),
-      el('td', { class: 'num' }, String(t.claims)),
-    ));
-
-    table.append(thead, tbody, tfoot);
-    body.append(el('div', { class: 'mb-scroll' }, table));
-    if (!rows.length) body.append(el('div', { class: 'mb-empty' }, '这段时间没有数据，换个筛选条件试试'));
+    const zero = items.filter(u => !u.uploads).length;
+    if (zero) body.append(el('div', { class: 'po-hint' }, `其中 ${zero} 位拍摄成员这段时间没有入片`));
   };
 
-  const applyFilters = d => {
-    // 服务端已按 space/role 过滤；这里只做兜底，避免空列表
-    if (!d.items) d.items = [];
-  };
+  const sumItem = (value, label) => el('div', {}, el('b', {}, value), el('span', {}, label));
 
+  let lastQ = '';
   const load = async () => {
-    const { from, to } = memberRange(st.preset, st.from, st.to);
-    st.from = from; st.to = to;
-    const q = new URLSearchParams();
+    const { from, to } = shootRange(st.preset);
+    const q = new URLSearchParams({ role: 'shooter' });   // 只统计拍摄成员
+    q.set('space', 'all');
     if (from) q.set('from', from);
     if (to) q.set('to', to);
-    q.set('space', st.space);
-    q.set('role', st.role);
+    lastQ = q.toString();
     body.innerHTML = '';
     body.append(el('div', { class: 'mb-empty' }, '加载中…'));
     try {
       data = await api('/stats/members?' + q);
-      paintTable();
+      paint();
       csvBtn.href = mediaUrl('/api/stats/members.csv?' + q);
     } catch (e) {
       body.innerHTML = '';
@@ -3431,42 +3362,19 @@ function membersPanel() {
     }
   };
 
-  // ---- 过滤条 ----
-  const presetBox = el('div', { class: 'mb-presets' }, ...MEMBER_PRESETS.map(([id, label]) =>
+  const presetBox = el('div', { class: 'mb-presets' }, ...SHOOT_PRESETS.map(([id, label]) =>
     el('button', {
       class: 'mb-chip' + (st.preset === id ? ' on' : ''),
       onclick: ev => {
         st.preset = id;
         [...presetBox.children].forEach(c => c.classList.toggle('on', c === ev.currentTarget));
-        dateWrap.hidden = id !== 'custom';
         load();
       },
     }, label)));
 
-  const fromIn = el('input', { type: 'date', value: st.from || '', class: 'mb-date' });
-  const toIn = el('input', { type: 'date', value: st.to || '', class: 'mb-date' });
-  const dateWrap = el('div', { class: 'mb-dates', hidden: st.preset !== 'custom' },
-    fromIn, el('span', {}, '至'), toIn,
-    el('button', { class: 'btn btn-ghost sm', onclick: () => { st.from = fromIn.value; st.to = toIn.value; load(); } }, '查询'));
+  const csvBtn = el('a', { class: 'btn btn-ghost sm', target: '_blank', rel: 'noopener', title: '导出当前区间的拍摄产出' }, '⬇ 导出 CSV');
 
-  const spaceSel = el('select', { class: 'mb-sel', onchange: e => { st.space = e.target.value; load(); } },
-    el('option', { value: 'all' }, '全部空间'),
-    el('option', { value: 'daily' }, '每日选片'),
-    el('option', { value: 'library' }, '素材库'));
-  spaceSel.value = st.space;
-
-  const roleSel = el('select', { class: 'mb-sel', onchange: e => { st.role = e.target.value; load(); } },
-    ...MEMBER_ROLES.map(([v, l]) => el('option', { value: v }, l)));
-  roleSel.value = st.role;
-
-  const csvBtn = el('a', { class: 'btn btn-ghost sm', target: '_blank', rel: 'noopener' }, '⬇ 导出 CSV');
-
-  wrap.insertBefore(el('div', { class: 'mb-bar' },
-    presetBox, dateWrap,
-    el('span', { style: { flex: 1 } }),
-    spaceSel, roleSel, csvBtn,
-  ), body);
-
+  wrap.append(el('div', { class: 'mb-bar' }, presetBox, el('span', { style: { flex: 1 } }), csvBtn), body);
   load();
   return wrap;
 }
