@@ -966,6 +966,40 @@ ok(csvTok.status === 200, '导出 CSV 带令牌可用', String(csvTok.status));
 const csvBody = await csvTok.text();
 ok(csvBody.includes(',') && csvBody.split('\n').length >= 2, 'CSV 内容非空', csvBody.slice(0, 40));
 
+/* ---------------- v1.12 成员工作量（业绩分析） ---------------- */
+console.log('\n== v1.12 成员工作量 ==');
+const mb = await call('/stats/members', { uid });
+ok(mb.status === 200 && Array.isArray(mb.data?.items), '成员工作量接口可用', String(mb.status));
+const adminRow = (mb.data.items || []).find(u => u.id === uid);
+ok(!!adminRow, '返回管理员这一行');
+ok((adminRow?.uploads || 0) > 0, '统计到素材产出', String(adminRow?.uploads));
+ok(typeof adminRow?.durationSec === 'number' && adminRow.durationSec >= 0, '统计到总时长', String(adminRow?.durationSec));
+ok(typeof adminRow?.sizeBytes === 'number' && adminRow.sizeBytes >= 0, '统计到总体积', String(adminRow?.sizeBytes));
+ok((mb.data.totals?.uploads || 0) >= (adminRow?.uploads || 0), '合计不小于个人', String(mb.data.totals?.uploads));
+
+// 空间过滤：素材库单独看
+const mbLib = await call('/stats/members?space=library', { uid });
+ok(mbLib.status === 200, '按空间筛选可用', String(mbLib.status));
+const adminLib = (mbLib.data.items || []).find(u => u.id === uid);
+ok((adminLib?.uploads || 0) < (adminRow?.uploads || 0), '素材库口径明显小于全部', `${adminLib?.uploads} < ${adminRow?.uploads}`);
+
+// 时间过滤：未来区间应为 0
+const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+const mbFuture = await call(`/stats/members?from=${tomorrow}&to=${tomorrow}`, { uid });
+const fRow = (mbFuture.data.items || []).find(u => u.id === uid);
+ok((fRow?.uploads || 0) === 0, '未来时间区间统计为 0', String(fRow?.uploads));
+
+// 角色过滤：只读角色应看不到人（测试库里没有 viewer）
+const mbViewer = await call('/stats/members?role=viewer', { uid });
+ok(Array.isArray(mbViewer.data?.items) && mbViewer.data.items.length === 0, '按角色筛选生效（无 viewer 则空）', String(mbViewer.data?.items?.length));
+
+// CSV 导出
+const csvRes = await fetch(`${BASE}/api/stats/members.csv?t=${encodeURIComponent(mediaToken)}`);
+ok(csvRes.status === 200, 'CSV 导出可用', String(csvRes.status));
+const csvText = await csvRes.text();
+ok(csvText.includes('成员') && csvText.includes('素材条数'), 'CSV 表头正确', csvText.slice(0, 60));
+ok(csvText.split('\n').length >= 3, 'CSV 含表头+数据+合计', String(csvText.split('\n').length));
+
 /* ---------------- 静态资源一致性（防 UI 路径回归） ---------------- */
 console.log('\n== 静态资源一致性 ==');
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
