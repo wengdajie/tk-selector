@@ -22,6 +22,49 @@ const safeParseScores = s => {
 /** 对外统一把 scores 序列化成对象，避免调用方再解析字符串 */
 const shape = v => (v ? { ...v, scores: safeParseScores(v.scores) } : v);
 
+/** 移动权限：仅上传者本人或管理员（与删除素材同一口径） */
+const canMove = (user, v) => !!user && (user.role === 'admin' || String(v.uploader_id) === String(user.id));
+const MOVE_DENIED = '只能移动自己上传的素材，或由管理员操作';
+
+/**
+ * 把原片从 media/<旧空间>/<日期>/ 迁到 media/<新空间>/<日期>/，并返回新的相对路径。
+ * 跨盘 rename 会抛 EXDEV，退化为复制后删除；目标同名时自动加 -movedN，绝不覆盖已有文件。
+ */
+function relocateVideoFile(v, space) {
+  const oldRel = v.file_path;
+  if (!oldRel) return { from: null, to: null, rel: '' };
+  const oldAbs = path.join(config.mediaDir, oldRel);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(v.shoot_date || '') ? v.shoot_date : ymd();
+  const destDir = path.join(config.mediaDir, space, date);
+  fs.mkdirSync(destDir, { recursive: true });
+  const base = path.basename(oldRel);
+  const ext = path.extname(base);
+  const stem = ext ? base.slice(0, -ext.length) : base;
+  let destAbs = path.join(destDir, base);
+  for (let i = 1; fs.existsSync(destAbs); i++) destAbs = path.join(destDir, `${stem}-moved${i}${ext}`);
+  if (fs.existsSync(oldAbs)) {
+    try { fs.renameSync(oldAbs, destAbs); }
+    catch (e) {
+      if (e.code !== 'EXDEV') throw e;
+      fs.copyFileSync(oldAbs, destAbs);
+      fs.unlinkSync(oldAbs);
+    }
+  }
+  return { from: oldAbs, to: destAbs, rel: path.relative(config.mediaDir, destAbs).split(path.sep).join('/') };
+}
+
+/** 进素材库不体检；回每日选片则重新排队体检 */
+const movedQcStatus = (v, space) =>
+  space === 'library' ? 'skipped' : (v.qc_status === 'skipped' ? 'pending' : v.qc_status);
+
+/** 事务失败时把已迁走的原片搬回原位 */
+function undoMoves(moved) {
+  for (const m of moved.slice().reverse()) {
+    if (!m.from) continue;
+    try { fs.renameSync(m.to, m.from); } catch { /* ignore */ }
+  }
+}
+
 const tmpDir = path.join(config.dataDir, 'tmp');
 fs.mkdirSync(tmpDir, { recursive: true });
 
@@ -250,9 +293,17 @@ r.patch('/videos/:id', requireUser, (req, res) => {
   const v = db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id);
   if (!v) return res.status(404).json({ error: '视频不存在' });
   const b = req.body || {};
+  const wantStage = normStage(b.stage);
+  const wantSpace = b.space === 'library' || b.space === 'daily' ? b.space : null;
+  const stageChanged = !!wantStage && wantStage !== v.stage;
+  const spaceChanged = !!wantSpace && wantSpace !== v.space;
+  // 「移动」类改动（阶段 / 空间）只允许上传者本人或管理员；其它字段维持原有协作口径
+  if ((stageChanged || spaceChanged) && !canMove(req.user, v)) {
+    return res.status(403).json({ error: MOVE_DENIED });
+  }
   const ratingGiven = b.rating !== undefined && b.rating !== null && b.rating !== '';
   const rating = ratingGiven ? Math.max(0, Math.min(5, Math.round(Number(b.rating) || 0))) : v.rating;
-  const stage = normStage(b.stage) || v.stage || 'new';
+  const stage = wantStage || v.stage || 'new';
   const scoresGiven = b.scores !== undefined;
   const scores = scoresGiven
     ? { ...safeParseScores(v.scores), ...normalizeScores(b.scores) }
@@ -266,17 +317,29 @@ r.patch('/videos/:id', requireUser, (req, res) => {
       : v.tags,
     request_id: b.requestId !== undefined ? (b.requestId || null) : v.request_id,
     shoot_date: /^\d{4}-\d{2}-\d{2}$/.test(b.shootDate || '') ? b.shootDate : v.shoot_date,
-    space: b.space === 'library' || b.space === 'daily' ? b.space : v.space,
+    space: wantSpace || v.space,
     rating,
     rated_by: ratingGiven ? (rating > 0 ? req.user.id : null) : v.rated_by,
     stage,
     scores: Object.keys(scores).length ? JSON.stringify(scores) : '',
     score_content: content,
   };
+  let filePath = v.file_path;
+  let qcStatus = v.qc_status;
+  if (spaceChanged) {
+    try {
+      const m = relocateVideoFile(v, next.space);
+      filePath = m.rel || filePath;
+      qcStatus = movedQcStatus(v, next.space);
+    } catch (e) {
+      return res.status(500).json({ error: '移动原片失败：' + (e.message || '未知错误') });
+    }
+  }
   db.prepare(`UPDATE videos SET title=@title,status=@status,tags=@tags,request_id=@request_id,
     shoot_date=@shoot_date,space=@space,rating=@rating,rated_by=@rated_by,
-    stage=@stage,scores=@scores,score_content=@score_content,updated_at=@updated_at WHERE id=@id`)
-    .run({ ...next, updated_at: Date.now(), id: v.id });
+    stage=@stage,scores=@scores,score_content=@score_content,file_path=@file_path,
+    qc_status=@qc_status,updated_at=@updated_at WHERE id=@id`)
+    .run({ ...next, file_path: filePath, qc_status: qcStatus, updated_at: Date.now(), id: v.id });
   res.json({ video: shape(db.prepare(`${LIST_SELECT} WHERE v.id = ?`).get(v.id)) });
 });
 
@@ -449,16 +512,70 @@ r.get('/pipeline', requireUser, (req, res) => {
   res.json({ total, stages, passRate, scored, dims });
 });
 
-/** 批量改阶段 */
+/**
+ * 统一移动：一次请求里可同时改阶段和跨空间。
+ * 跨空间会同步迁移原片物理文件、修正 file_path，并按目标空间重算体检状态。
+ * 权限先全量预检，禁止「部分成功」的半吊子写入。
+ */
+r.post('/videos/bulk-move', requireUser, (req, res) => {
+  const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).filter(Boolean).map(String))];
+  const wantStage = req.body?.stage !== undefined && req.body?.stage !== null && req.body?.stage !== '';
+  const stage = wantStage ? normStage(req.body.stage) : null;
+  const space = ['daily', 'library'].includes(req.body?.space) ? req.body.space : null;
+  if (!ids.length) return res.status(400).json({ error: '未选择视频' });
+  if (!stage && !space) return res.status(400).json({ error: '请指定目标阶段或目标空间' });
+  if (wantStage && !stage) return res.status(400).json({ error: '阶段不合法' });
+
+  const rows = ids.map(id => db.prepare('SELECT * FROM videos WHERE id = ?').get(id));
+  if (rows.some(v => !v)) return res.status(404).json({ error: '部分视频不存在' });
+  if (rows.some(v => !canMove(req.user, v))) return res.status(403).json({ error: MOVE_DENIED });
+
+  const moved = [];
+  try {
+    db.transaction(() => {
+      const upd = db.prepare(`UPDATE videos SET space=@space, stage=@stage, file_path=@file_path,
+        qc_status=@qc_status, updated_at=@updated_at WHERE id=@id`);
+      const now = Date.now();
+      for (const v of rows) {
+        let filePath = v.file_path || '';
+        let qcStatus = v.qc_status;
+        let nextSpace = v.space;
+        if (space && space !== v.space) {
+          const m = relocateVideoFile(v, space);
+          moved.push(m);
+          filePath = m.rel || filePath;
+          qcStatus = movedQcStatus(v, space);
+          nextSpace = space;
+        }
+        upd.run({
+          space: nextSpace,
+          stage: stage || v.stage || 'new',
+          file_path: filePath,
+          qc_status: qcStatus,
+          updated_at: now,
+          id: v.id,
+        });
+      }
+    })();
+  } catch (e) {
+    undoMoves(moved);
+    return res.status(500).json({ error: '移动失败：' + (e.message || '未知错误') });
+  }
+  res.json({ ok: true, count: ids.length, stage, space });
+});
+
+/** 批量改阶段（兼容旧调用；权限口径与 bulk-move 一致） */
 r.post('/videos/bulk-stage', requireUser, (req, res) => {
-  const ids = (req.body?.ids || []).filter(Boolean);
+  const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).filter(Boolean).map(String))];
   const stage = normStage(req.body?.stage);
   if (!ids.length) return res.status(400).json({ error: '未选择视频' });
   if (!stage) return res.status(400).json({ error: '阶段不合法' });
+  const rows = ids.map(id => db.prepare('SELECT * FROM videos WHERE id = ?').get(id));
+  if (rows.some(v => !v)) return res.status(404).json({ error: '部分视频不存在' });
+  if (rows.some(v => !canMove(req.user, v))) return res.status(403).json({ error: MOVE_DENIED });
   const stmt = db.prepare('UPDATE videos SET stage = ?, updated_at = ? WHERE id = ?');
   const now = Date.now();
-  const tx = db.transaction(() => ids.forEach(id => stmt.run(stage, now, id)));
-  tx();
+  db.transaction(() => rows.forEach(v => stmt.run(stage, now, v.id)))();
   res.json({ ok: true, count: ids.length, stage });
 });
 

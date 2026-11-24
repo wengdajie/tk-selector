@@ -1005,6 +1005,106 @@ const csvText = await csvRes.text();
 ok(csvText.includes('成员') && csvText.includes('素材条数'), 'CSV 表头正确', csvText.slice(0, 60));
 ok(csvText.split('\n').length >= 3, 'CSV 含表头+数据+合计', String(csvText.split('\n').length));
 
+/* ---------------- v1.13.0 统一移动（阶段 + 空间 + 权限 + 原片迁移） ---------------- */
+console.log('\n== v1.13.0 移动功能 ==');
+const mvOwner = await call('/users', { method: 'POST', body: { name: '移动验证上传者', password: 'mv12345678', role: 'shooter' } });
+const ownerUid = mvOwner.data?.user?.id;
+const mvOther = await call('/users', { method: 'POST', body: { name: '移动验证路人', password: 'mv12345678', role: 'shooter' } });
+const otherUid = mvOther.data?.user?.id;
+ok(mvOwner.status === 201 && !!ownerUid && mvOther.status === 201 && !!otherUid,
+  '准备上传者与路人两个非管理员账号', `${mvOwner.status}/${mvOther.status}`);
+
+const mvSample = path.join(tmp, 'move-sample.mp4');
+execFileSync('ffmpeg', [
+  '-hide_banner', '-loglevel', 'error', '-y',
+  '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=20',
+  '-t', '3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', mvSample,
+]);
+const mvFd = new FormData();
+mvFd.append('files', new Blob([fs.readFileSync(mvSample)], { type: 'video/mp4' }), 'move-sample.mp4');
+mvFd.append('space', 'daily');
+mvFd.append('shootDate', ymdLocal());
+mvFd.append('title', '移动验证素材');
+const mvUp = await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': ownerUid }, body: mvFd });
+const mvUpData = await mvUp.json().catch(() => ({}));
+const mvId = mvUpData.items?.[0]?.id;
+ok(mvUp.ok && !!mvId, '上传者上传一条每日选片素材', String(mvUp.status));
+
+const openMvDb = () => new Database(path.join(env.DATA_DIR, 'app.db'));
+const mvRow = id => { const d = openMvDb(); const r = d.prepare('SELECT * FROM videos WHERE id = ?').get(id); d.close(); return r; };
+const mediaAbs = rel => path.join(env.DATA_DIR, 'media', rel || '');
+const before = mvRow(mvId);
+ok(before?.space === 'daily' && String(before.file_path).startsWith('daily/'),
+  '初始状态：空间与物理目录都是 daily', String(before?.file_path));
+ok(fs.existsSync(mediaAbs(before.file_path)), '初始原片文件存在', before?.file_path);
+
+// 权限：非上传者不能移动（批量与单条 PATCH 都要挡住）
+const denyBulk = await call('/videos/bulk-move', { method: 'POST', uid: otherUid, body: { ids: [mvId], stage: 'final' } });
+ok(denyBulk.status === 403, '路人批量移动被拒', String(denyBulk.status));
+const denyPatch = await call('/videos/' + mvId, { method: 'PATCH', uid: otherUid, body: { space: 'library' } });
+ok(denyPatch.status === 403, '路人通过 PATCH 改空间也被拒', String(denyPatch.status));
+ok(mvRow(mvId).stage === before.stage && mvRow(mvId).space === 'daily', '越权请求没有产生部分写入');
+
+// 部分越权：一人是自己的、一人不是，整批拒绝
+const adminSample = path.join(tmp, 'move-admin.mp4');
+execFileSync('ffmpeg', [
+  '-hide_banner', '-loglevel', 'error', '-y',
+  '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=20',
+  '-f', 'lavfi', '-i', 'sine=frequency=880',
+  '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', '-preset', 'ultrafast', adminSample,
+]);
+const adminFd = new FormData();
+adminFd.append('files', new Blob([fs.readFileSync(adminSample)], { type: 'video/mp4' }), 'move-admin.mp4');
+adminFd.append('space', 'daily');
+adminFd.append('shootDate', ymdLocal());
+adminFd.append('title', '移动验证管理员素材');
+const adminUp = await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: adminFd });
+const adminMvId = (await adminUp.json().catch(() => ({}))).items?.[0]?.id;
+ok(adminUp.ok && !!adminMvId, '管理员上传一条素材用于混合批次验证', String(adminUp.status));
+const adminVidBefore = mvRow(adminMvId);
+const mixed = await call('/videos/bulk-move', { method: 'POST', uid: ownerUid, body: { ids: [mvId, adminMvId], stage: 'final' } });
+ok(mixed.status === 403, '混合批次含他人素材时整批拒绝', String(mixed.status));
+ok(mvRow(adminMvId).stage === adminVidBefore.stage, '混合批次中他人素材未被改动', String(mvRow(adminMvId)?.stage));
+
+// 参数校验
+ok((await call('/videos/bulk-move', { method: 'POST', uid, body: { ids: [] } })).status === 400, '空选移动返回 400');
+ok((await call('/videos/bulk-move', { method: 'POST', uid, body: { ids: [mvId], stage: 'bogus' } })).status === 400, '非法阶段返回 400');
+ok((await call('/videos/bulk-move', { method: 'POST', uid, body: { ids: [mvId] } })).status === 400, '未指定目标返回 400');
+
+// 上传者本人：一次请求同时改阶段和空间
+const moved = await call('/videos/bulk-move', { method: 'POST', uid: ownerUid, body: { ids: [mvId], stage: 'screened', space: 'library' } });
+ok(moved.status === 200 && moved.data?.count === 1, '上传者可一次移动阶段与空间', String(moved.status));
+const inLib = mvRow(mvId);
+ok(inLib.space === 'library' && inLib.stage === 'screened', '数据库空间与阶段均已更新', `${inLib.space}/${inLib.stage}`);
+ok(String(inLib.file_path).startsWith('library/'), 'file_path 同步到 library 目录', inLib.file_path);
+ok(!fs.existsSync(mediaAbs(before.file_path)) && fs.existsSync(mediaAbs(inLib.file_path)),
+  '原片物理文件已迁移（旧路径消失、新路径存在）', inLib.file_path);
+ok(inLib.qc_status === 'skipped', '进入素材库后跳过体检', String(inLib.qc_status));
+
+// 管理员：移回每日选片，体检状态重新排队
+const backMove = await call('/videos/bulk-move', { method: 'POST', uid, body: { ids: [mvId], stage: 'shortlisted', space: 'daily' } });
+ok(backMove.status === 200, '管理员可移回每日选片', String(backMove.status));
+const inDaily = mvRow(mvId);
+ok(inDaily.space === 'daily' && inDaily.stage === 'shortlisted', '移回后空间与阶段正确', `${inDaily.space}/${inDaily.stage}`);
+ok(String(inDaily.file_path).startsWith('daily/') && fs.existsSync(mediaAbs(inDaily.file_path)),
+  '原片物理文件回到 daily 且仍可访问', inDaily.file_path);
+ok(inDaily.qc_status === 'pending', '回到每日选片后重新排队体检', String(inDaily.qc_status));
+
+// 兼容路径：单条 PATCH 改空间也要搬文件
+const patchSpace = await call('/videos/' + mvId, { method: 'PATCH', uid, body: { space: 'library' } });
+ok(patchSpace.status === 200, '单条 PATCH 改空间仍可用', String(patchSpace.status));
+const patchRow = mvRow(mvId);
+ok(String(patchRow.file_path).startsWith('library/') && fs.existsSync(mediaAbs(patchRow.file_path)),
+  'PATCH 改空间也同步迁移原片', patchRow.file_path);
+ok(patchRow.stage === inDaily.stage, 'PATCH 只改空间时不误改阶段', patchRow.stage);
+
+// 移动后媒体仍可下载
+const mvDl = await call('/downloads', { method: 'POST', uid, body: { videoIds: [mvId], note: '移动后下载' } });
+ok([200, 201].includes(mvDl.status) && !!mvDl.data?.downloadUrl, '移动后可正常创建下载', String(mvDl.status));
+const mvDlRes = await fetch(`${BASE}${mvDl.data?.downloadUrl || ''}?t=${encodeURIComponent(mediaToken)}`);
+ok(mvDlRes.status === 200, '移动后下载链接仍指向有效文件', String(mvDlRes.status));
+try { await mvDlRes.body?.cancel?.(); } catch { /* ignore */ }
+
 /* ---------------- 静态资源一致性（防 UI 路径回归） ---------------- */
 console.log('\n== 静态资源一致性 ==');
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
@@ -1019,6 +1119,9 @@ for (const navEl of ['nav', 'navMain', 'navAdmin', 'mobileNav']) {
 }
 ok(html.includes('data-view="settings"'), 'index.html 有系统设置入口');
 ok(appjs.includes("view === 'settings'"), 'app.js 支持设置视图切换');
+ok(html.includes('data-act="move"'), '批量操作条有「移动」入口');
+ok(!html.includes('data-act="library"'), '旧「存入素材库」按钮已收进移动菜单');
+ok(appjs.includes('/videos/bulk-move') && appjs.includes('openMoveMenu'), '前端统一移动菜单调用 bulk-move');
 
 /* ---------------- v1.8.0 下载记录权限 + TikTok 竖滑播放器 ---------------- */
 console.log('\n== v1.8.0 记录权限收口 ==');

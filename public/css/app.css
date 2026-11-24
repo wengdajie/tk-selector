@@ -1244,6 +1244,41 @@ select { appearance: none; cursor: pointer; }
 .at-menu .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .at-menu .at-ok { font-style: normal; color: var(--cy); font-size: 11px; font-weight: 700; }
 .at-menu .at-no { font-style: normal; color: var(--tx3); font-size: 10px; }
+
+/* ---- 移动到… 菜单（批量条 / 抽屉共用） ---- */
+.mv-menu {
+  position: fixed; z-index: 80;
+  width: 186px;
+  max-height: min(70vh, 420px);
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  box-shadow: var(--sh-3);
+  animation: pop .26s var(--spring);
+}
+.mv-head {
+  padding: 7px 9px 9px;
+  border-bottom: 1px solid var(--line);
+  color: var(--tx1); font-size: 12px; font-weight: 700;
+}
+.mv-label {
+  padding: 9px 9px 4px;
+  color: var(--tx3); font-size: 10.5px; letter-spacing: .04em;
+}
+.mv-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; padding: 7px 9px;
+  background: none; border: 0; border-radius: var(--r-sm);
+  color: var(--tx1); font-size: 12px; text-align: left; cursor: pointer;
+}
+.mv-item:hover { background: var(--panel-3); }
+.mv-item.on { color: var(--brand); background: var(--brand-soft); }
+.mv-item i { font-style: normal; font-size: 10px; color: var(--tx3); }
+.mv-item.on i { color: var(--brand); }
+.mv-hint { margin-top: 12px; color: var(--tx3); font-size: 11px; line-height: 1.6; }
+
 .mem-at {
   margin-left: 6px;
   padding: 1px 5px;

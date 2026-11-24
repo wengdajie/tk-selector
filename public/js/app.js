@@ -2278,6 +2278,70 @@ function openJoinModal() {
   setTimeout(() => name.focus(), 60);
 }
 
+/* ---- 统一「移动到…」菜单：批量条与抽屉共用 ---- */
+let moveMenuRef = null;   // { el, outside, onKey }
+function closeMoveMenu() {
+  if (!moveMenuRef) return;
+  document.removeEventListener('click', moveMenuRef.outside);
+  document.removeEventListener('keydown', moveMenuRef.onKey);
+  moveMenuRef.el.remove();
+  moveMenuRef = null;
+}
+
+function openMoveMenu(anchor, { ids, current = {}, onDone }) {
+  closeMoveMenu();
+  const menu = el('div', { class: 'mv-menu' },
+    el('div', { class: 'mv-head' }, `移动到…${ids.length > 1 ? ` · 已选 ${ids.length} 条` : ''}`),
+  );
+
+  const addGroup = (label, items) => {
+    menu.append(el('div', { class: 'mv-label' }, label));
+    for (const it of items) {
+      menu.append(el('button', {
+        class: 'mv-item' + (it.on ? ' on' : ''),
+        onclick: async () => {
+          closeMoveMenu();
+          try {
+            await api('/videos/bulk-move', { method: 'POST', body: { ids, ...it.patch } });
+            toast(it.toast);
+            onDone?.();
+            reload();
+            refreshStats();
+          } catch (e) { toast(e.message, 'err'); }
+        },
+      }, el('span', {}, it.label), it.on ? el('i', {}, '当前') : null));
+    }
+  };
+
+  addGroup('流水线阶段', STAGES.map(s => ({
+    label: s.label,
+    patch: { stage: s.key },
+    toast: `已移到「${s.label}」`,
+    on: current.stage === s.key,
+  })));
+  addGroup('所属空间', [
+    { label: '每日选片', patch: { space: 'daily' }, toast: '已移到每日选片', on: current.space === 'daily' },
+    { label: '素材库', patch: { space: 'library' }, toast: '已移到素材库', on: current.space === 'library' },
+  ]);
+
+  document.body.append(menu);
+  const rect = anchor?.getBoundingClientRect?.() || { left: 12, top: window.innerHeight - 60, bottom: window.innerHeight };
+  const mw = menu.offsetWidth || 190, mh = menu.offsetHeight || 300;
+  let left = Math.min(rect.left, window.innerWidth - mw - 10);
+  let top = rect.top - mh - 10;
+  if (top < 10) top = Math.min(rect.bottom + 8, window.innerHeight - mh - 10);
+  menu.style.left = Math.max(10, left) + 'px';
+  menu.style.top = Math.max(10, top) + 'px';
+
+  const outside = e => { if (!menu.contains(e.target)) closeMoveMenu(); };
+  const onKey = e => { if (e.key === 'Escape') closeMoveMenu(); };
+  moveMenuRef = { el: menu, outside, onKey };
+  setTimeout(() => {
+    document.addEventListener('click', outside);
+    document.addEventListener('keydown', onKey);
+  }, 0);
+}
+
 /* ========================= 选择 & 批量 ========================= */
 function toggleSelect(id) {
   if (S.selected.has(id)) S.selected.delete(id);
@@ -2321,15 +2385,11 @@ async function onBulkAction(e) {
     } catch (err) { toast(err.message, 'err'); }
     return;
   }
-  if (act === 'library') {
-    try {
-      for (const id of ids) await api('/videos/' + id, { method: 'PATCH', body: { space: 'library' } });
-      toast(`已存入素材库 ${ids.length} 条`);
-      S.selected.clear();
-      updateBulkBar();
-      reload();
-      refreshStats();
-    } catch (err) { toast(err.message, 'err'); }
+  if (act === 'move') {
+    openMoveMenu(e.target.closest('button'), {
+      ids,
+      onDone: () => { S.selected.clear(); updateBulkBar(); renderList(); },
+    });
     return;
   }
   if (act === 'qc') {
@@ -2611,16 +2671,13 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
       }, v.status === 'picked' ? '★ 已选' : '☆ 标为已选'),
       el('button', {
         class: 'btn btn-ghost',
-        onclick: async () => {
-          try {
-            await api('/videos/' + v.id, { method: 'PATCH', body: { space: v.space === 'library' ? 'daily' : 'library' } });
-            toast(v.space === 'library' ? '已移回每日选片' : '已存入素材库');
-            closeDrawer();
-            reload();
-            refreshStats();
-          } catch (e) { toast(e.message, 'err'); }
-        },
-      }, v.space === 'library' ? '移回每日' : '存素材库'),
+        title: '改阶段或移到每日选片 / 素材库',
+        onclick: e => openMoveMenu(e.currentTarget, {
+          ids: [v.id],
+          current: { stage: v.stage, space: v.space },
+          onDone: () => closeDrawer(),
+        }),
+      }, '⇄ 移动到…'),
       el('button', {
         class: 'btn btn-ghost',
         onclick: () => openEditVideo(v),
@@ -2733,21 +2790,8 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
       el('span', { class: 'sc-lbl', title: d.hint }, d.label), range, out);
   });
 
-  const stageRow = el('div', { class: 'stagepick' },
-    ...STAGES.map(s => el('button', {
-      class: 'spick' + (v.stage === s.key ? ' on' : ''),
-      onclick: async ev => {
-        try {
-          await api('/videos/' + v.id, { method: 'PATCH', body: { stage: s.key } });
-          v.stage = s.key;
-          ev.currentTarget.parentElement.querySelectorAll('.spick')
-            .forEach(b => b.classList.toggle('on', b === ev.currentTarget));
-          toast(`已移到「${s.label}」`);
-          reload();
-          refreshStats();
-        } catch (e) { toast(e.message, 'err'); }
-      },
-    }, s.label)));
+  const stageHint = el('div', { class: 'mv-hint' },
+    `当前阶段：${stageLabel(v.stage)} · 用上方「⇄ 移动到…」改阶段或换空间`);
 
   const scoreSec = el('div', { class: 'dsec' },
     el('div', { class: 'qc-head' },
@@ -2758,8 +2802,7 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
       ),
     ),
     el('div', { class: 'sc-list' }, ...scRows),
-    el('div', { class: 'mini-lbl', style: { marginTop: '12px', display: 'block' } }, '流水线阶段'),
-    stageRow,
+    stageHint,
   );
 
   // ---- 评论 ----
