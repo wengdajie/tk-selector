@@ -257,6 +257,7 @@ function bindGlobal() {
     reload();
   }, 300));
   document.getElementById('bulkbar').addEventListener('click', onBulkAction);
+  window.addEventListener('pagehide', closeMoveMenu);
 }
 
 /* ========================= 身份 ========================= */
@@ -386,6 +387,7 @@ function switchView(view, force = false) {
     view = 'dashboard';
   }
   S.view = view;
+  closeMoveMenu();
   S.selected.clear();
   if (view === 'library') S.space = 'library';
   else if (view === 'daily') S.space = 'daily';
@@ -2279,37 +2281,63 @@ function openJoinModal() {
 }
 
 /* ---- 统一「移动到…」菜单：批量条与抽屉共用 ---- */
-let moveMenuRef = null;   // { el, outside, onKey }
+let moveMenuRef = null;   // { el, outside, onKey, onScroll }
+let moveBusy = false;
 function closeMoveMenu() {
   if (!moveMenuRef) return;
-  document.removeEventListener('click', moveMenuRef.outside);
-  document.removeEventListener('keydown', moveMenuRef.onKey);
-  moveMenuRef.el.remove();
+  const { el: menu, outside, onKey, onScroll } = moveMenuRef;
+  document.removeEventListener('click', outside);
+  document.removeEventListener('keydown', onKey);
+  window.removeEventListener('scroll', onScroll, true);
+  window.removeEventListener('resize', onScroll);
+  menu.remove();
   moveMenuRef = null;
 }
 
-function openMoveMenu(anchor, { ids, current = {}, onDone }) {
+/** 前端镜像服务端权限：只有上传者本人或管理员能移动/删除 */
+function canManage(v) {
+  const me = S.user || getUser();
+  return !!me && (me.role === 'admin' || String(v?.uploader_id) === String(me.id));
+}
+
+function openMoveMenu(anchor, { ids, videos = [], current = {}, onDone }) {
   closeMoveMenu();
+  if (moveBusy) { toast('正在处理上一条，请稍候', 'err'); return; }
+  const byId = new Map(videos.map(v => [String(v.id), v]));
+  // 没拿到视频对象时不过滤，交给服务端做最终防线
+  const allowed = ids.filter(id => {
+    const v = byId.get(String(id));
+    return !v || canManage(v);
+  });
+  if (!allowed.length) { toast('这些素材不是你上传的，只有上传者或管理员能移动', 'err'); return; }
+  const skipped = ids.length - allowed.length;
+
   const menu = el('div', { class: 'mv-menu' },
-    el('div', { class: 'mv-head' }, `移动到…${ids.length > 1 ? ` · 已选 ${ids.length} 条` : ''}`),
+    el('div', { class: 'mv-head' }, `移动到…${allowed.length > 1 ? ` · 已选 ${allowed.length} 条` : ''}`),
   );
+  if (skipped) menu.append(el('div', { class: 'mv-warn' }, `其中 ${skipped} 条不是你上传的，已跳过`));
 
   const addGroup = (label, items) => {
     menu.append(el('div', { class: 'mv-label' }, label));
     for (const it of items) {
-      menu.append(el('button', {
+      const btn = el('button', {
         class: 'mv-item' + (it.on ? ' on' : ''),
         onclick: async () => {
+          if (moveBusy) return;
+          moveBusy = true;
+          btn.disabled = true;
           closeMoveMenu();
           try {
-            await api('/videos/bulk-move', { method: 'POST', body: { ids, ...it.patch } });
+            await api('/videos/bulk-move', { method: 'POST', body: { ids: allowed, ...it.patch } });
             toast(it.toast);
-            onDone?.();
-            reload();
+            if (onDone) await onDone();
+            await reload();
             refreshStats();
           } catch (e) { toast(e.message, 'err'); }
+          finally { moveBusy = false; }
         },
-      }, el('span', {}, it.label), it.on ? el('i', {}, '当前') : null));
+      }, el('span', {}, it.label), it.on ? el('i', {}, '当前') : null);
+      menu.append(btn);
     }
   };
 
@@ -2333,10 +2361,29 @@ function openMoveMenu(anchor, { ids, current = {}, onDone }) {
   menu.style.left = Math.max(10, left) + 'px';
   menu.style.top = Math.max(10, top) + 'px';
 
-  const outside = e => { if (!menu.contains(e.target)) closeMoveMenu(); };
-  const onKey = e => { if (e.key === 'Escape') closeMoveMenu(); };
-  moveMenuRef = { el: menu, outside, onKey };
+  const outside = e => {
+    // 归属校验：菜单已被新菜单替换时，旧监听器自己摘掉，绝不残留
+    if (moveMenuRef?.el !== menu) {
+      document.removeEventListener('click', outside);
+      document.removeEventListener('keydown', onKey);
+      return;
+    }
+    if (!menu.contains(e.target)) closeMoveMenu();
+  };
+  const onKey = e => {
+    if (moveMenuRef?.el !== menu) {
+      document.removeEventListener('click', outside);
+      document.removeEventListener('keydown', onKey);
+      return;
+    }
+    if (e.key === 'Escape') closeMoveMenu();
+  };
+  const onScroll = () => closeMoveMenu();
+  moveMenuRef = { el: menu, outside, onKey, onScroll };
+  window.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onScroll);
   setTimeout(() => {
+    if (moveMenuRef?.el !== menu) return;   // 已关闭就不再挂载，杜绝监听泄漏
     document.addEventListener('click', outside);
     document.addEventListener('keydown', onKey);
   }, 0);
@@ -2388,8 +2435,29 @@ async function onBulkAction(e) {
   if (act === 'move') {
     openMoveMenu(e.target.closest('button'), {
       ids,
-      onDone: () => { S.selected.clear(); updateBulkBar(); renderList(); },
+      videos: S.items.filter(v => S.selected.has(v.id)),
+      onDone: () => { S.selected.clear(); updateBulkBar(); },
     });
+    return;
+  }
+  if (act === 'delete') {
+    const rows = S.items.filter(v => S.selected.has(v.id));
+    const allowed = rows.filter(canManage).map(v => v.id);
+    const skipped = rows.length - allowed.length;
+    if (!allowed.length) { toast('这些素材不是你上传的，只有上传者或管理员能删除', 'err'); return; }
+    const message = `将永久删除 ${allowed.length} 条素材及其原片、评论、脚本和播放版，不可恢复。`
+      + (skipped ? `\n另有 ${skipped} 条不是你上传的，已跳过。` : '');
+    if (!await confirmDialog({
+      title: '批量删除素材', message, confirmText: '删除', danger: true,
+    })) return;
+    try {
+      const r = await api('/videos/bulk-delete', { method: 'POST', body: { ids: allowed } });
+      toast(`已删除 ${r.count} 条${r.failedCleanup?.length ? `（${r.failedCleanup.length} 个文件清理失败，详见日志）` : ''}`);
+      allowed.forEach(id => S.selected.delete(id));
+      updateBulkBar();
+      await reload();
+      refreshStats();
+    } catch (err) { toast(err.message, 'err'); }
     return;
   }
   if (act === 'qc') {
@@ -2543,6 +2611,7 @@ async function openVideo(id) {
 }
 
 function closeDrawer() {
+  closeMoveMenu();
   const root = document.getElementById('drawer');
   root.hidden = true;
   root.innerHTML = '';
@@ -2671,11 +2740,16 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
       }, v.status === 'picked' ? '★ 已选' : '☆ 标为已选'),
       el('button', {
         class: 'btn btn-ghost',
-        title: '改阶段或移到每日选片 / 素材库',
+        title: canManage(v) ? '改阶段或移到每日选片 / 素材库' : '只有上传者或管理员能移动',
+        disabled: !canManage(v),
         onclick: e => openMoveMenu(e.currentTarget, {
           ids: [v.id],
+          videos: [v],
           current: { stage: v.stage, space: v.space },
-          onDone: () => closeDrawer(),
+          onDone: async () => {
+            try { renderDrawer(await api('/videos/' + v.id)); }
+            catch { closeDrawer(); }
+          },
         }),
       }, '⇄ 移动到…'),
       el('button', {
@@ -2715,7 +2789,9 @@ function renderDrawer({ video: v, comments, downloads, siblings, similar, script
             el('div', { class: 'qc-title' }, '素材库资料不参与投放体检'),
             el('div', { class: 'qc-sub' }, '素材库存的是通用素材 / 参考资料；只有「每日选片」里的投放素材才做体检'),
           ),
-        ))
+        ),
+        el('div', { class: 'mv-hint' }, `当前阶段：${stageLabel(v.stage)} · 用上方「⇄ 移动到…」改阶段或换空间`),
+      )
     : el('div', { class: 'dsec' },
     el('div', { class: 'qc-head' },
       el('div', { class: `qc-score ${scoreCls}` }, v.qc_status === 'pending' ? '…' : (v.qc_score == null ? '—' : String(v.qc_score))),

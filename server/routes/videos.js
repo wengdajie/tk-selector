@@ -22,47 +22,119 @@ const safeParseScores = s => {
 /** 对外统一把 scores 序列化成对象，避免调用方再解析字符串 */
 const shape = v => (v ? { ...v, scores: safeParseScores(v.scores) } : v);
 
-/** 移动权限：仅上传者本人或管理员（与删除素材同一口径） */
+const MEDIA_ROOT = path.resolve(config.mediaDir);
+const MAX_BULK = 200;
+const normalizeIds = raw => [...new Set((Array.isArray(raw) ? raw : []).filter(Boolean).map(String))];
+
+/** 媒体相对路径越界保护：任何 ../ 逃逸都直接拒绝 */
+function safeMediaPath(rel) {
+  const abs = path.resolve(MEDIA_ROOT, String(rel || ''));
+  if (abs !== MEDIA_ROOT && !abs.startsWith(MEDIA_ROOT + path.sep)) throw new Error('媒体路径越界');
+  return abs;
+}
+
+/** 移动/删除权限：仅上传者本人或管理员 */
 const canMove = (user, v) => !!user && (user.role === 'admin' || String(v.uploader_id) === String(user.id));
 const MOVE_DENIED = '只能移动自己上传的素材，或由管理员操作';
 
 /**
- * 把原片从 media/<旧空间>/<日期>/ 迁到 media/<新空间>/<日期>/，并返回新的相对路径。
- * 跨盘 rename 会抛 EXDEV，退化为复制后删除；目标同名时自动加 -movedN，绝不覆盖已有文件。
+ * 把原片从 media/<旧空间>/<日期>/ 迁到 media/<新空间>/<日期>/。
+ * 源文件不存在直接失败——绝不「假装搬成功」把 DB 改成指向不存在的文件。
+ * 跨盘 EXDEV 退化为复制后删除，并记录策略供回滚复用；同名加 -movedN 不覆盖。
  */
-function relocateVideoFile(v, space) {
+function relocateVideoFile(v, space, date) {
   const oldRel = v.file_path;
-  if (!oldRel) return { from: null, to: null, rel: '' };
-  const oldAbs = path.join(config.mediaDir, oldRel);
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(v.shoot_date || '') ? v.shoot_date : ymd();
-  const destDir = path.join(config.mediaDir, space, date);
+  if (!oldRel) throw new Error('该素材没有原片路径，无法移动');
+  const oldAbs = safeMediaPath(oldRel);
+  if (!fs.existsSync(oldAbs) || !fs.statSync(oldAbs).isFile()) throw new Error('原片文件不存在，无法移动');
+  const useDate = /^\d{4}-\d{2}-\d{2}$/.test(date || '')
+    ? date
+    : (/^\d{4}-\d{2}-\d{2}$/.test(v.shoot_date || '') ? v.shoot_date : ymd());
+  const destDir = path.join(MEDIA_ROOT, space, useDate);
   fs.mkdirSync(destDir, { recursive: true });
   const base = path.basename(oldRel);
   const ext = path.extname(base);
   const stem = ext ? base.slice(0, -ext.length) : base;
   let destAbs = path.join(destDir, base);
   for (let i = 1; fs.existsSync(destAbs); i++) destAbs = path.join(destDir, `${stem}-moved${i}${ext}`);
-  if (fs.existsSync(oldAbs)) {
-    try { fs.renameSync(oldAbs, destAbs); }
-    catch (e) {
-      if (e.code !== 'EXDEV') throw e;
-      fs.copyFileSync(oldAbs, destAbs);
-      fs.unlinkSync(oldAbs);
-    }
+  let strategy = 'rename';
+  try { fs.renameSync(oldAbs, destAbs); }
+  catch (e) {
+    if (e.code !== 'EXDEV') throw e;
+    strategy = 'copy';
+    fs.copyFileSync(oldAbs, destAbs);
+    fs.unlinkSync(oldAbs);
   }
-  return { from: oldAbs, to: destAbs, rel: path.relative(config.mediaDir, destAbs).split(path.sep).join('/') };
+  return {
+    from: oldAbs, to: destAbs, strategy,
+    rel: path.relative(MEDIA_ROOT, destAbs).split(path.sep).join('/'),
+  };
 }
 
 /** 进素材库不体检；回每日选片则重新排队体检 */
 const movedQcStatus = (v, space) =>
   space === 'library' ? 'skipped' : (v.qc_status === 'skipped' ? 'pending' : v.qc_status);
 
-/** 事务失败时把已迁走的原片搬回原位 */
+/** 回每日选片时清掉上一轮体检结论，避免新体检完成前展示过期数据 */
+const QC_RESET_SQL = `qc_score=NULL, qc_flags='', phash=NULL, sim_of=NULL, sim_dist=NULL,
+  lufs=NULL, peak_db=NULL, black_pct=NULL, freeze_pct=NULL, crop=NULL`;
+
+/** 事务失败时按去程策略回滚；任何回滚失败都要打日志，禁止静默吞错 */
 function undoMoves(moved) {
+  let errors = 0;
   for (const m of moved.slice().reverse()) {
-    if (!m.from) continue;
-    try { fs.renameSync(m.to, m.from); } catch { /* ignore */ }
+    try {
+      if (m.strategy === 'copy') {
+        if (fs.existsSync(m.to)) { fs.copyFileSync(m.to, m.from); fs.unlinkSync(m.to); }
+      } else if (fs.existsSync(m.to) && !fs.existsSync(m.from)) {
+        fs.renameSync(m.to, m.from);
+      }
+    } catch (e) {
+      errors++;
+      console.error('[move] 回滚失败:', m.from, '=>', m.to, e.message);
+    }
   }
+  return errors;
+}
+
+/** 单条 / 批量删除共用的数据库级联（必须在事务里调用） */
+function deleteVideoCascade(v) {
+  const scripts = db.prepare('SELECT id, frames FROM scripts WHERE video_id = ?').all(v.id);
+  db.prepare('DELETE FROM scripts WHERE video_id = ?').run(v.id);
+  // 不依赖 frames 字段：正在跑的脚本可能还没写入帧路径
+  const frameDirs = new Set(scripts.map(s => `s-${s.id}`));
+  for (const s of scripts) {
+    try {
+      for (const f of s.frames ? JSON.parse(s.frames) : []) {
+        const d = String(f?.path || '').split('/')[1];
+        if (d && d.startsWith('s-')) frameDirs.add(d);
+      }
+    } catch { /* 帧字段损坏就跳过 */ }
+  }
+  // 扫描记录解除关联，否则 SCAN_MODE=copy 时同一源文件会被永久跳过
+  db.prepare('UPDATE scan_files SET video_id = NULL WHERE video_id = ?').run(v.id);
+  // 相似素材引用置空，避免详情页 similar 查询断裂
+  db.prepare('UPDATE videos SET sim_of = NULL, sim_dist = NULL WHERE sim_of = ?').run(v.id);
+  db.prepare('DELETE FROM videos WHERE id = ?').run(v.id);
+  return { frameDirs: [...frameDirs], files: [v.file_path, v.thumb_path].filter(Boolean) };
+}
+
+/** 文件清理放在 DB 提交之后；失败不静默，返回残留清单 */
+function cleanupVideoFiles(v, plan) {
+  const failed = [];
+  for (const d of plan.frameDirs) {
+    try { fs.rmSync(path.join(MEDIA_ROOT, 'frames', d), { recursive: true, force: true }); }
+    catch (e) { failed.push(`frames/${d}`); console.error('[delete] 关键帧目录清理失败:', d, e.message); }
+  }
+  for (const rel of plan.files) {
+    try { fs.unlinkSync(safeMediaPath(rel)); }
+    catch (e) {
+      if (e.code !== 'ENOENT') { failed.push(rel); console.error('[delete] 文件清理失败:', rel, e.message); }
+    }
+  }
+  try { require('../lib/proxy').dropOne(v.id); }
+  catch (e) { failed.push(`proxies/${v.id}.mp4`); console.error('[delete] 播放版清理失败:', e.message); }
+  return failed;
 }
 
 const tmpDir = path.join(config.dataDir, 'tmp');
@@ -326,77 +398,100 @@ r.patch('/videos/:id', requireUser, (req, res) => {
   };
   let filePath = v.file_path;
   let qcStatus = v.qc_status;
+  let qcReset = '';
   if (spaceChanged) {
-    try {
-      const m = relocateVideoFile(v, next.space);
-      filePath = m.rel || filePath;
-      qcStatus = movedQcStatus(v, next.space);
-    } catch (e) {
-      return res.status(500).json({ error: '移动原片失败：' + (e.message || '未知错误') });
-    }
+    qcStatus = movedQcStatus(v, next.space);
+    if (next.space === 'daily') qcReset = ', ' + QC_RESET_SQL;
   }
-  db.prepare(`UPDATE videos SET title=@title,status=@status,tags=@tags,request_id=@request_id,
-    shoot_date=@shoot_date,space=@space,rating=@rating,rated_by=@rated_by,
-    stage=@stage,scores=@scores,score_content=@score_content,file_path=@file_path,
-    qc_status=@qc_status,updated_at=@updated_at WHERE id=@id`)
-    .run({ ...next, file_path: filePath, qc_status: qcStatus, updated_at: Date.now(), id: v.id });
+  const moved = [];
+  const now = Date.now();
+  // 文件搬迁与 DB 更新同生共死：DB 失败就按策略把原片搬回原位
+  try {
+    db.transaction(() => {
+      if (spaceChanged) {
+        const m = relocateVideoFile(v, next.space, next.shoot_date);
+        moved.push(m);
+        filePath = m.rel;
+      }
+      const info = db.prepare(`UPDATE videos SET title=@title,status=@status,tags=@tags,request_id=@request_id,
+        shoot_date=@shoot_date,space=@space,rating=@rating,rated_by=@rated_by,
+        stage=@stage,scores=@scores,score_content=@score_content,file_path=@file_path,
+        qc_status=@qc_status${qcReset},updated_at=@updated_at
+        WHERE id=@id AND updated_at=@oldUpdated AND file_path=@oldPath`)
+        .run({ ...next, file_path: filePath, qc_status: qcStatus, updated_at: now,
+          oldUpdated: v.updated_at, oldPath: v.file_path, id: v.id });
+      if (info.changes !== 1) throw new Error('素材已被其他人修改，请刷新后重试');
+    })();
+  } catch (e) {
+    const undoErrors = undoMoves(moved);
+    return res.status(500).json({
+      error: '移动失败：' + (e.message || '未知错误') + (undoErrors ? `（${undoErrors} 个文件回滚失败，详见日志）` : ''),
+    });
+  }
+  if (spaceChanged && next.space === 'daily') require('../lib/qcworker').tick().catch(() => {});
   res.json({ video: shape(db.prepare(`${LIST_SELECT} WHERE v.id = ?`).get(v.id)) });
 });
 
 r.delete('/videos/:id', requireUser, (req, res) => {
   const v = db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id);
   if (!v) return res.status(404).json({ error: '视频不存在' });
-  if (req.user.role !== 'admin' && v.uploader_id !== req.user.id) {
-    return res.status(403).json({ error: '只有上传者或管理员可以删除' });
-  }
-  // 级联：素材没了，挂在它名下的脚本（含脚本专属关键帧目录）一起清掉，避免孤儿数据与磁盘泄漏
-  const scripts = db.prepare('SELECT id, frames FROM scripts WHERE video_id = ?').all(v.id);
-  db.prepare('DELETE FROM scripts WHERE video_id = ?').run(v.id);
-  const frameDirs = new Set();
-  for (const s of scripts) {
-    try {
-      for (const f of s.frames ? JSON.parse(s.frames) : []) {
-        const d = String(f?.path || '').split('/')[1];
-        if (d && d.startsWith('s-')) frameDirs.add(d);
-      }
-    } catch { /* 帧字段损坏就跳过 */ }
-  }
-  for (const d of frameDirs) {
-    try { fs.rmSync(path.join(config.mediaDir, 'frames', d), { recursive: true, force: true }); }
-    catch { /* ignore */ }
-  }
-  db.prepare('DELETE FROM videos WHERE id = ?').run(v.id);
-  for (const rel of [v.file_path, v.thumb_path].filter(Boolean)) {
-    try { fs.unlinkSync(path.join(config.mediaDir, rel)); } catch { /* ignore */ }
-  }
-  // 播放版（代理）跟着一起删，否则磁盘只增不减
-  try { require('../lib/proxy').dropOne(v.id); } catch { /* ignore */ }
-  res.json({ ok: true });
+  if (!canMove(req.user, v)) return res.status(403).json({ error: '只有上传者或管理员可以删除' });
+  let plan;
+  try { db.transaction(() => { plan = deleteVideoCascade(v); })(); }
+  catch (e) { return res.status(500).json({ error: '删除失败：' + (e.message || '未知错误') }); }
+  const failed = cleanupVideoFiles(v, plan);
+  res.json({ ok: true, failedCleanup: failed });
 });
 
-// 批量评分 / 批量改状态
+/** 批量删除：与单条共用级联逻辑，全量预检后才动手，不存在「删一半」 */
+r.post('/videos/bulk-delete', requireUser, (req, res) => {
+  const ids = normalizeIds(req.body?.ids);
+  if (!ids.length) return res.status(400).json({ error: '未选择视频' });
+  if (ids.length > MAX_BULK) return res.status(400).json({ error: `单次最多删除 ${MAX_BULK} 条` });
+  const rows = ids.map(id => db.prepare('SELECT * FROM videos WHERE id = ?').get(id));
+  if (rows.some(v => !v)) return res.status(404).json({ error: '部分视频不存在' });
+  if (rows.some(v => !canMove(req.user, v))) {
+    return res.status(403).json({ error: '只能删除自己上传的素材，或由管理员操作' });
+  }
+  const plans = [];
+  try { db.transaction(() => { for (const v of rows) plans.push(deleteVideoCascade(v)); })(); }
+  catch (e) { return res.status(500).json({ error: '批量删除失败：' + (e.message || '未知错误') }); }
+  const failedCleanup = [];
+  rows.forEach((v, i) => failedCleanup.push(...cleanupVideoFiles(v, plans[i]).map(f => `${v.id}: ${f}`)));
+  res.json({ ok: true, count: rows.length, failedCleanup });
+});
+
+// 批量评分 / 批量改状态（统一去重、上限与真实变更数）
 r.post('/videos/bulk-rate', requireUser, (req, res) => {
-  const ids = (req.body?.ids || []).filter(Boolean);
+  const ids = normalizeIds(req.body?.ids);
   const rating = Math.max(0, Math.min(5, Math.round(Number(req.body?.rating) || 0)));
   if (!ids.length) return res.status(400).json({ error: '未选择视频' });
+  if (ids.length > MAX_BULK) return res.status(400).json({ error: `单次最多处理 ${MAX_BULK} 条` });
+  if (ids.some(id => !db.prepare('SELECT 1 FROM videos WHERE id = ?').get(id))) {
+    return res.status(404).json({ error: '部分视频不存在' });
+  }
   const stmt = db.prepare('UPDATE videos SET rating = ?, rated_by = ?, updated_at = ? WHERE id = ?');
   const now = Date.now();
   const by = rating > 0 ? req.user.id : null;
-  const tx = db.transaction(() => ids.forEach(id => stmt.run(rating, by, now, id)));
-  tx();
-  res.json({ ok: true, count: ids.length, rating });
+  let changed = 0;
+  db.transaction(() => { for (const id of ids) changed += stmt.run(rating, by, now, id).changes; })();
+  res.json({ ok: true, count: changed, requested: ids.length, changed, rating });
 });
 
 r.post('/videos/bulk-status', requireUser, (req, res) => {
-  const ids = (req.body?.ids || []).filter(Boolean);
+  const ids = normalizeIds(req.body?.ids);
   const status = req.body?.status;
   if (!ids.length) return res.status(400).json({ error: '未选择视频' });
+  if (ids.length > MAX_BULK) return res.status(400).json({ error: `单次最多处理 ${MAX_BULK} 条` });
   if (!['new', 'picked', 'archived'].includes(status)) return res.status(400).json({ error: '状态不合法' });
+  if (ids.some(id => !db.prepare('SELECT 1 FROM videos WHERE id = ?').get(id))) {
+    return res.status(404).json({ error: '部分视频不存在' });
+  }
   const stmt = db.prepare('UPDATE videos SET status = ?, updated_at = ? WHERE id = ?');
   const now = Date.now();
-  const tx = db.transaction(() => ids.forEach(id => stmt.run(status, now, id)));
-  tx();
-  res.json({ ok: true, count: ids.length });
+  let changed = 0;
+  db.transaction(() => { for (const id of ids) changed += stmt.run(status, now, id).changes; })();
+  res.json({ ok: true, count: changed, requested: ids.length, changed });
 });
 
 /** 单条素材立即体检（详情页按钮） */
@@ -413,16 +508,19 @@ r.post('/videos/:id/qc', requireUser, async (req, res) => {
   }
 });
 
-/** 批量体检：把选中的素材重新排队 */
+/** 批量体检：把选中的每日选片素材重新排队，素材库条目明确跳过 */
 r.post('/videos/bulk-qc', requireUser, (req, res) => {
-  const ids = (req.body?.ids || []).filter(Boolean);
+  const ids = normalizeIds(req.body?.ids);
   if (!ids.length) return res.status(400).json({ error: '未选择视频' });
-  // 素材库资料不参与体检
-  const stmt = db.prepare("UPDATE videos SET qc_status='pending' WHERE id = ? AND space = 'daily'");
-  const tx = db.transaction(() => ids.forEach(id => stmt.run(id)));
-  tx();
-  require('../lib/qcworker').tick().catch(() => {});
-  res.json({ ok: true, count: ids.length });
+  if (ids.length > MAX_BULK) return res.status(400).json({ error: `单次最多处理 ${MAX_BULK} 条` });
+  const rows = ids.map(id => db.prepare('SELECT id, space FROM videos WHERE id = ?').get(id));
+  const skipped = ids.filter((id, i) => !rows[i] || rows[i].space !== 'daily');
+  const targets = ids.filter((id, i) => rows[i]?.space === 'daily');
+  const stmt = db.prepare("UPDATE videos SET qc_status='pending', qc_score=NULL, qc_flags='' WHERE id = ?");
+  let changed = 0;
+  db.transaction(() => { for (const id of targets) changed += stmt.run(id).changes; })();
+  if (changed) require('../lib/qcworker').tick().catch(() => {});
+  res.json({ ok: true, count: changed, requested: ids.length, changed, skipped });
 });
 
 /** 选片清单导出（投放 / 剪辑交接用） */
@@ -518,11 +616,12 @@ r.get('/pipeline', requireUser, (req, res) => {
  * 权限先全量预检，禁止「部分成功」的半吊子写入。
  */
 r.post('/videos/bulk-move', requireUser, (req, res) => {
-  const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).filter(Boolean).map(String))];
+  const ids = normalizeIds(req.body?.ids);
   const wantStage = req.body?.stage !== undefined && req.body?.stage !== null && req.body?.stage !== '';
   const stage = wantStage ? normStage(req.body.stage) : null;
   const space = ['daily', 'library'].includes(req.body?.space) ? req.body.space : null;
   if (!ids.length) return res.status(400).json({ error: '未选择视频' });
+  if (ids.length > MAX_BULK) return res.status(400).json({ error: `单次最多移动 ${MAX_BULK} 条` });
   if (!stage && !space) return res.status(400).json({ error: '请指定目标阶段或目标空间' });
   if (wantStage && !stage) return res.status(400).json({ error: '阶段不合法' });
 
@@ -530,45 +629,64 @@ r.post('/videos/bulk-move', requireUser, (req, res) => {
   if (rows.some(v => !v)) return res.status(404).json({ error: '部分视频不存在' });
   if (rows.some(v => !canMove(req.user, v))) return res.status(403).json({ error: MOVE_DENIED });
 
+  const base = `UPDATE videos SET space=@space, stage=@stage, file_path=@file_path,
+    qc_status=@qc_status`;
+  const upd = db.prepare(`${base}, updated_at=@updated_at
+    WHERE id=@id AND updated_at=@oldUpdated AND file_path=@oldPath`);
+  const updReset = db.prepare(`${base}, ${QC_RESET_SQL}, updated_at=@updated_at
+    WHERE id=@id AND updated_at=@oldUpdated AND file_path=@oldPath`);
+
   const moved = [];
+  let backToDaily = false;
   try {
     db.transaction(() => {
-      const upd = db.prepare(`UPDATE videos SET space=@space, stage=@stage, file_path=@file_path,
-        qc_status=@qc_status, updated_at=@updated_at WHERE id=@id`);
       const now = Date.now();
       for (const v of rows) {
         let filePath = v.file_path || '';
         let qcStatus = v.qc_status;
         let nextSpace = v.space;
+        let reset = false;
         if (space && space !== v.space) {
-          const m = relocateVideoFile(v, space);
+          const m = relocateVideoFile(v, space, v.shoot_date);
           moved.push(m);
-          filePath = m.rel || filePath;
+          filePath = m.rel;
           qcStatus = movedQcStatus(v, space);
           nextSpace = space;
+          reset = space === 'daily';
+          if (reset) backToDaily = true;
         }
-        upd.run({
+        const params = {
           space: nextSpace,
           stage: stage || v.stage || 'new',
           file_path: filePath,
           qc_status: qcStatus,
           updated_at: now,
+          oldUpdated: v.updated_at,
+          oldPath: v.file_path,
           id: v.id,
-        });
+        };
+        // 乐观锁：预检之后被别人改过就整批失败并回滚文件
+        if ((reset ? updReset : upd).run(params).changes !== 1) {
+          throw new Error('有素材已被其他人修改，请刷新后重试');
+        }
       }
     })();
   } catch (e) {
-    undoMoves(moved);
-    return res.status(500).json({ error: '移动失败：' + (e.message || '未知错误') });
+    const undoErrors = undoMoves(moved);
+    return res.status(500).json({
+      error: '移动失败：' + (e.message || '未知错误') + (undoErrors ? `（${undoErrors} 个文件回滚失败，详见日志）` : ''),
+    });
   }
+  if (backToDaily) require('../lib/qcworker').tick().catch(() => {});
   res.json({ ok: true, count: ids.length, stage, space });
 });
 
 /** 批量改阶段（兼容旧调用；权限口径与 bulk-move 一致） */
 r.post('/videos/bulk-stage', requireUser, (req, res) => {
-  const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).filter(Boolean).map(String))];
+  const ids = normalizeIds(req.body?.ids);
   const stage = normStage(req.body?.stage);
   if (!ids.length) return res.status(400).json({ error: '未选择视频' });
+  if (ids.length > MAX_BULK) return res.status(400).json({ error: `单次最多处理 ${MAX_BULK} 条` });
   if (!stage) return res.status(400).json({ error: '阶段不合法' });
   const rows = ids.map(id => db.prepare('SELECT * FROM videos WHERE id = ?').get(id));
   if (rows.some(v => !v)) return res.status(404).json({ error: '部分视频不存在' });

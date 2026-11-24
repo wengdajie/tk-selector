@@ -109,6 +109,7 @@ app.listen(config.port, config.host, () => {
   scanner.startScheduler();
   try { require('./lib/qcworker').start(); } catch (e) { console.warn('[qc] 启动失败:', e.message); }
   try { require('./lib/proxy').recoverStale(); require('./lib/proxy').gc(); } catch (e) { console.warn('[proxy] 启动复位/清理失败:', e.message); }
+  try { require('./lib/reconcile').reconcileMedia(); } catch (e) { console.warn('[reconcile] 启动对账失败:', e.message); }
 });
 
 module.exports = app;

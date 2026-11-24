@@ -1105,6 +1105,115 @@ const mvDlRes = await fetch(`${BASE}${mvDl.data?.downloadUrl || ''}?t=${encodeUR
 ok(mvDlRes.status === 200, '移动后下载链接仍指向有效文件', String(mvDlRes.status));
 try { await mvDlRes.body?.cancel?.(); } catch { /* ignore */ }
 
+/* ---------------- v1.13.1 深度审查修复 + 批量删除 ---------------- */
+console.log('\n== v1.13.1 批量删除与一致性 ==');
+const hugeIds = Array.from({ length: 201 }, (_, i) => 'x' + i);
+ok((await call('/videos/bulk-move', { method: 'POST', uid, body: { ids: hugeIds, stage: 'final' } })).status === 400,
+  'bulk-move 超过 200 条返回 400');
+ok((await call('/videos/bulk-delete', { method: 'POST', uid, body: { ids: hugeIds } })).status === 400,
+  'bulk-delete 超过 200 条返回 400');
+
+// 批量体检要如实报告跳过项
+const qcMix = await call('/videos/bulk-qc', { method: 'POST', uid, body: { ids: [mvId, adminMvId] } });
+ok(qcMix.status === 200 && (qcMix.data.skipped || []).includes(mvId),
+  'bulk-qc 对素材库条目明确返回 skipped', JSON.stringify(qcMix.data.skipped));
+ok((qcMix.data.changed || 0) >= 1, 'bulk-qc 返回真实变更数', String(qcMix.data.changed));
+
+// 移回每日选片：清掉上一轮体检结论
+const wqc = openMvDb();
+wqc.prepare('UPDATE videos SET qc_score=88, qc_flags=?, sim_of=? WHERE id=?').run('loud', adminMvId, mvId);
+wqc.close();
+const resetMove = await call('/videos/bulk-move', { method: 'POST', uid, body: { ids: [mvId], space: 'daily' } });
+ok(resetMove.status === 200, '移回每日选片成功', String(resetMove.status));
+const afterReset = mvRow(mvId);
+ok(afterReset.qc_score == null && !afterReset.qc_flags, '移回每日选片清空过期体检数据', `${afterReset.qc_score}/${afterReset.qc_flags}`);
+
+// 并发反向移动：最终 DB 空间与文件实际位置必须一致
+const race = await Promise.all([
+  call('/videos/bulk-move', { method: 'POST', uid, body: { ids: [mvId], space: 'library' } }),
+  call('/videos/bulk-move', { method: 'POST', uid, body: { ids: [mvId], space: 'daily' } }),
+]);
+ok(race.every(r => [200, 500].includes(r.status)), '并发移动不会崩溃（乐观锁冲突返回 500）', race.map(r => r.status).join('/'));
+const raced = mvRow(mvId);
+ok(String(raced.file_path).startsWith(raced.space + '/') && fs.existsSync(mediaAbs(raced.file_path)),
+  '并发后 DB 空间与文件实际位置一致', `${raced.space}/${raced.file_path}`);
+
+// 源文件缺失必须 fail loud，不能把 DB 改成指向不存在的文件
+const beforeMiss = mvRow(mvId);
+const fakeRel = (beforeMiss.space === 'library' ? 'daily' : 'library') + '/' + beforeMiss.shoot_date + '/missing-' + mvId + '.mp4';
+const wm = openMvDb();
+wm.prepare('UPDATE videos SET file_path=? WHERE id=?').run(fakeRel, mvId);
+wm.close();
+const missMove = await call('/videos/bulk-move', {
+  method: 'POST', uid, body: { ids: [mvId], space: beforeMiss.space === 'library' ? 'daily' : 'library' },
+});
+ok(missMove.status === 500 && String(missMove.data.error).includes('原片文件不存在'),
+  '原片缺失时移动失败并明确报错（不再静默改写 DB）', String(missMove.data.error));
+ok(mvRow(mvId).file_path === fakeRel, '失败后 DB 路径保持不变', mvRow(mvId).file_path);
+const wr = openMvDb();
+wr.prepare('UPDATE videos SET file_path=? WHERE id=?').run(beforeMiss.file_path, mvId);
+wr.close();
+
+// PATCH 同时改拍摄日期与空间：文件要落到新日期目录
+const dateMove = await call('/videos/' + mvId, { method: 'PATCH', uid, body: { shootDate: '2020-01-02', space: 'library' } });
+ok(dateMove.status === 200, 'PATCH 同时改日期与空间成功', String(dateMove.status));
+const dated = mvRow(mvId);
+ok(String(dated.file_path).includes('/2020-01-02/') && fs.existsSync(mediaAbs(dated.file_path)),
+  '原片落到新拍摄日期目录', dated.file_path);
+
+// 批量删除权限
+const delDeny = await call('/videos/bulk-delete', { method: 'POST', uid: otherUid, body: { ids: [mvId] } });
+ok(delDeny.status === 403, '路人批量删除被拒', String(delDeny.status));
+ok(!!mvRow(mvId), '越权删除后素材仍在');
+
+// 批量删除：级联脚本、关键帧、scan_files、相似引用、原片
+const bulkDelId = adminMvId;
+const bulkDelRow = mvRow(bulkDelId);
+const bulkDelAbs = mediaAbs(bulkDelRow.file_path);
+const bulkSid = 's-del-' + uuidv4Like();
+const bulkFrameDir = path.join(env.DATA_DIR, 'media', 'frames', 's-' + bulkSid);
+fs.mkdirSync(bulkFrameDir, { recursive: true });
+fs.writeFileSync(path.join(bulkFrameDir, '0.jpg'), Buffer.alloc(16, 1));
+const wbdel = openMvDb();
+wbdel.prepare('INSERT INTO scripts (id,video_id,status,frames,created_at,updated_at) VALUES (?,?,\'done\',?,?,?)')
+  .run(bulkSid, bulkDelId, JSON.stringify([{ path: `frames/s-${bulkSid}/0.jpg` }]), Date.now(), Date.now());
+wbdel.prepare('INSERT INTO scan_files (path,size,mtime,video_id,scanned_at) VALUES (?,?,?,?,?)')
+  .run('/tmp/del-source.mp4', 1234, Date.now(), bulkDelId, Date.now());
+wbdel.prepare('UPDATE videos SET sim_of=? WHERE id=?').run(bulkDelId, mvId);
+wbdel.close();
+const bulkDelRes = await call('/videos/bulk-delete', { method: 'POST', uid, body: { ids: [bulkDelId] } });
+ok(bulkDelRes.status === 200 && bulkDelRes.data.count === 1, '批量删除成功', JSON.stringify(bulkDelRes.data));
+ok((bulkDelRes.data.failedCleanup || []).length === 0, '批量删除没有文件清理残留',
+  JSON.stringify(bulkDelRes.data.failedCleanup));
+ok(!mvRow(bulkDelId) && !fs.existsSync(bulkDelAbs), 'DB 记录与原片文件都已删除',
+  `db=${!!mvRow(bulkDelId)} file=${fs.existsSync(bulkDelAbs)} path=${bulkDelAbs}`);
+ok(!fs.existsSync(bulkFrameDir), '脚本关键帧目录已删除（含未写入 frames 字段的目录）');
+const wdc = openMvDb();
+ok(!wdc.prepare('SELECT 1 FROM scripts WHERE video_id=?').get(bulkDelId), '脚本记录已级联删除');
+const sf = wdc.prepare('SELECT video_id FROM scan_files WHERE path=?').get('/tmp/del-source.mp4');
+ok(sf && sf.video_id == null, 'scan_files 关联已解除（源文件可重新入库）');
+ok(!wdc.prepare('SELECT 1 FROM videos WHERE sim_of=?').get(bulkDelId), '相似素材引用已清空');
+wdc.close();
+
+// 启动对账：DB 指向错位目录时按真实文件修复
+const recRow = mvRow(mvId);
+const wrongSpace = recRow.space === 'library' ? 'daily' : 'library';
+const wrongRel = wrongSpace + '/' + recRow.shoot_date + '/' + path.basename(recRow.file_path);
+const wr2 = openMvDb();
+wr2.prepare('UPDATE videos SET file_path=? WHERE id=?').run(wrongRel, mvId);
+wr2.close();
+// reconcile 模块读 process.env；测试进程要临时指向同一 DATA_DIR，否则会打开默认库
+const savedDataDir = process.env.DATA_DIR;
+process.env.DATA_DIR = env.DATA_DIR;
+const { reconcileMedia } = require(path.join(root, 'server', 'lib', 'reconcile.js'));
+const rep = reconcileMedia();
+if (savedDataDir === undefined) delete process.env.DATA_DIR;
+else process.env.DATA_DIR = savedDataDir;
+const fixedRow = mvRow(mvId);
+ok(rep.fixed >= 1 && fixedRow.file_path === recRow.file_path,
+  '启动对账修复 DB 与文件错位', `${wrongRel} -> ${fixedRow.file_path}`);
+ok(fs.existsSync(mediaAbs(fixedRow.file_path)), '对账后路径指向真实文件', fixedRow.file_path);
+
 /* ---------------- 静态资源一致性（防 UI 路径回归） ---------------- */
 console.log('\n== 静态资源一致性 ==');
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
@@ -1120,8 +1229,11 @@ for (const navEl of ['nav', 'navMain', 'navAdmin', 'mobileNav']) {
 ok(html.includes('data-view="settings"'), 'index.html 有系统设置入口');
 ok(appjs.includes("view === 'settings'"), 'app.js 支持设置视图切换');
 ok(html.includes('data-act="move"'), '批量操作条有「移动」入口');
+ok(html.includes('data-act="delete"'), '批量操作条有「删除」入口');
 ok(!html.includes('data-act="library"'), '旧「存入素材库」按钮已收进移动菜单');
 ok(appjs.includes('/videos/bulk-move') && appjs.includes('openMoveMenu'), '前端统一移动菜单调用 bulk-move');
+ok(appjs.includes('/videos/bulk-delete') && appjs.includes('canManage'), '前端批量删除带权限预判');
+ok(appjs.includes("window.addEventListener('pagehide', closeMoveMenu)"), '菜单在页面离开时统一清理');
 
 /* ---------------- v1.8.0 下载记录权限 + TikTok 竖滑播放器 ---------------- */
 console.log('\n== v1.8.0 记录权限收口 ==');

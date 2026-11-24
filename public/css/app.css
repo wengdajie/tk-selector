@@ -1263,6 +1263,13 @@ select { appearance: none; cursor: pointer; }
   border-bottom: 1px solid var(--line);
   color: var(--tx1); font-size: 12px; font-weight: 700;
 }
+.mv-warn {
+  margin: 7px 5px 2px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: var(--warn-soft, var(--brand-soft));
+  color: var(--tx2); font-size: 11px; line-height: 1.5;
+}
 .mv-label {
   padding: 9px 9px 4px;
   color: var(--tx3); font-size: 10.5px; letter-spacing: .04em;
