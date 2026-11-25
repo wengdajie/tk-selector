@@ -177,6 +177,9 @@ fs.mkdirSync(path.join(tmp, 'watch'), { recursive: true });
 
 let srv = null;
 let log = '';
+process.on('exit', () => {
+  if (process.env.DUMP_SRV_LOG) console.log('\n--- SERVER LOG TAIL ---\n' + log.slice(-6000));
+});
 const spawnServer = () => {
   const s = spawn(process.execPath, ['server/index.js'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
   s.stdout.on('data', d => { log += d; });
@@ -723,7 +726,7 @@ extraClosers.push(() => feedSrv.close());
 const feedUrl = `http://127.0.0.1:${feedSrv.address().port}/hook`;
 // 钉钉 + 公网地址（用本机地址模拟公网可达）
 await call('/settings/notify', { method: 'PUT', uid, body: {
-  notify_type: 'dingtalk', notify_url: feedUrl, notify_public_base: 'https://tk.example.com',
+  notify_type: 'dingtalk', notify_url: feedUrl, notify_public_base: BASE,
   notify_enabled: true, notify_on_upload: true, notify_on_comment: false,
 } });
 const ffd = new FormData();
@@ -735,13 +738,13 @@ await sleep(700);
 const fp = feedHooks.at(-1)?.body || {};
 ok(fp.msgtype === 'feedCard', '钉钉入库通知用 feedCard 缩略图卡片', fp.msgtype);
 const link0 = fp.feedCard?.links?.[0] || {};
-ok(!!link0.picURL && link0.picURL.startsWith('https://tk.example.com/api/videos/'), '卡片带封面图 picURL（公网地址）', link0.picURL);
+ok(!!link0.picURL && link0.picURL.startsWith(BASE + '/api/videos/'), '卡片带封面图 picURL（公网地址）', link0.picURL);
 ok(String(link0.messageURL || '').startsWith('dingtalk://dingtalkclient/page/link?url='),
   '卡片链接走 dingtalk:// 协议（强制系统浏览器打开，不走钉钉内置浏览器）', link0.messageURL);
 {
   const u = new URL(String(link0.messageURL || '').replace('dingtalk://dingtalkclient/page/link', 'https://x/'));
   const inner = decodeURIComponent(u.searchParams.get('url') || '');
-  ok(inner.startsWith('https://tk.example.com/?open='), '链接落点是单素材深链（?open=id）', inner);
+  ok(inner.startsWith(BASE + '/?open='), '链接落点是单素材深链（?open=id）', inner);
   ok(u.searchParams.get('pc_slide') === 'false', 'pc_slide=false（PC 弹系统浏览器）', u.searchParams.get('pc_slide'));
 }
 ok(String(link0.title || '').includes('缩略图卡片验证'), '卡片标题是素材标题', link0.title);
@@ -757,9 +760,31 @@ const fp2 = feedHooks.at(-1)?.body || {};
 ok(fp2.msgtype === 'markdown', '没配公网地址时回落到 markdown 文字列表', fp2.msgtype);
 ok(String(fp2.markdown?.text || '').includes('公网访问地址'), '回落消息里提示配置公网地址', String(fp2.markdown?.text || '').slice(0, 120));
 
+// 公网地址不可达：改发纯文字，不再给群里发裂图
+await call('/settings/notify', { method: 'PUT', uid, body: { notify_public_base: 'https://tk.example.com' } });
+const deadSample = mkSample('dead-public.mp4', '260x460', 1.2);
+const deadFd = new FormData();
+deadFd.append('files', new Blob([fs.readFileSync(deadSample)], { type: 'video/mp4' }), 'dead-public.mp4');
+deadFd.append('space', 'daily');
+deadFd.append('title', '公网失联验证');
+await fetch(BASE + '/api/videos/upload', { method: 'POST', headers: { 'x-user-id': uid }, body: deadFd });
+await sleep(1200);
+const deadCard = feedHooks.at(-1)?.body || {};
+ok(deadCard.msgtype === 'markdown', '公网地址不可达时不发 feedCard（避免裂图）', deadCard.msgtype);
+ok(String(deadCard.markdown?.text || '').includes('公网地址当前不可达'),
+  '回落文字明确提示公网地址失联', String(deadCard.markdown?.text || '').slice(-120));
+
+// 设置页健康探测
+const hBad = await call('/settings/notify/health', { uid });
+ok(hBad.status === 200 && hBad.data.ok === false && hBad.data.publicBase === 'https://tk.example.com',
+  '健康探测能识别失效的公网地址', JSON.stringify(hBad.data));
+await call('/settings/notify', { method: 'PUT', uid, body: { notify_public_base: BASE } });
+const hGood = await call('/settings/notify/health', { uid });
+ok(hGood.status === 200 && hGood.data.ok === true, '健康探测能识别可达的公网地址');
+
 console.log('\n== v1.9.1 钉钉链接：跳转地址 + 外部浏览器 ==');
 await call('/settings/notify', { method: 'PUT', uid, body: {
-  notify_type: 'dingtalk', notify_url: feedUrl, notify_public_base: 'https://tk.example.com',
+  notify_type: 'dingtalk', notify_url: feedUrl, notify_public_base: BASE,
   notify_link_base: 'http://192.168.1.4:8899', notify_enabled: true, notify_on_upload: true, notify_on_comment: true,
 } });
 const lbSample = mkSample('qc-link.mp4', '280x480', 1.1);
@@ -774,7 +799,7 @@ const lbCard = feedHooks.at(-1)?.body || {};
 const lbUrl = new URL(String(lbCard.feedCard?.links?.[0]?.messageURL || '').replace('dingtalk://dingtalkclient/page/link', 'https://x/'));
 const lbInner = decodeURIComponent(lbUrl.searchParams.get('url') || '');
 ok(lbInner.startsWith('http://192.168.1.4:8899/?open='), '跳转地址可独立配内网 IP（缩略图仍用公网）', lbInner);
-ok(String(lbCard.feedCard?.links?.[0]?.picURL || '').startsWith('https://tk.example.com/'), '缩略图仍走公网地址（内网拉不到图）', lbCard.feedCard?.links?.[0]?.picURL);
+ok(String(lbCard.feedCard?.links?.[0]?.picURL || '').startsWith(BASE + '/'), '缩略图仍走公网地址（与跳转地址分离）', lbCard.feedCard?.links?.[0]?.picURL);
 
 // 评论通知也带可点击链接
 await call('/settings/notify', { method: 'PUT', uid, body: { notify_on_comment: true } });
@@ -1168,6 +1193,12 @@ ok(!!mvRow(mvId), '越权删除后素材仍在');
 
 // 批量删除：级联脚本、关键帧、scan_files、相似引用、原片
 const bulkDelId = adminMvId;
+// 等播放版转码结束再删，避免 Windows 上 ffmpeg 还占着原片导致 unlink 偶发失败
+for (let i = 0; i < 40; i++) {
+  const st = mvRow(bulkDelId)?.proxy_state;
+  if (st !== 'running') break;
+  await sleep(500);
+}
 const bulkDelRow = mvRow(bulkDelId);
 const bulkDelAbs = mediaAbs(bulkDelRow.file_path);
 const bulkSid = 's-del-' + uuidv4Like();
@@ -1234,6 +1265,7 @@ ok(!html.includes('data-act="library"'), '旧「存入素材库」按钮已收�
 ok(appjs.includes('/videos/bulk-move') && appjs.includes('openMoveMenu'), '前端统一移动菜单调用 bulk-move');
 ok(appjs.includes('/videos/bulk-delete') && appjs.includes('canManage'), '前端批量删除带权限预判');
 ok(appjs.includes("window.addEventListener('pagehide', closeMoveMenu)"), '菜单在页面离开时统一清理');
+ok(appjs.includes('/settings/notify/health') && appjs.includes('healthChip'), '设置页展示公网地址健康状态');
 
 /* ---------------- v1.8.0 下载记录权限 + TikTok 竖滑播放器 ---------------- */
 console.log('\n== v1.8.0 记录权限收口 ==');

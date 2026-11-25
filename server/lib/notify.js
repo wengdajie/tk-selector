@@ -144,6 +144,22 @@ const publicBase = () => settings.getNotify().publicBase || '';
 const thumbUrl = (v, base) => base + '/api/videos/' + v.id + '/thumb';
 const streamUrl = (v, base) => base + '/api/videos/' + v.id + '/stream';
 
+/**
+ * 发图前先确认公网地址真的活着。Cloudflare 快速隧道重启会换随机域名，
+ * 旧域名会让钉钉/企微显示裂图——探测失败就退回纯文字通知，不发包裂图。
+ */
+async function probePublicBase(base) {
+  if (!base) return { ok: false, reason: '未配置公网访问地址' };
+  try {
+    const res = await fetch(base.replace(/\/+$/, '') + '/healthz', { signal: AbortSignal.timeout(2500) });
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
+    await res.body?.cancel?.();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: e?.name === 'TimeoutError' ? '探测超时（2.5s）' : (e?.message || '无法连接') };
+  }
+}
+
 /** 真正发包（带一次重试）；「测试」接口用它拿错误信息 */
 async function sendRaw(cfg, text, mentions, payloadOverride) {
   let url = cfg.url;
@@ -169,14 +185,16 @@ async function sendRaw(cfg, text, mentions, payloadOverride) {
 /* ---------------- 业务事件 ---------------- */
 
 /** 素材入库（上传 / 扫描）。videos: 新入库的素材行；uploader: 触发人（扫描可为空） */
-function onUpload(videos, uploader) {
+async function onUpload(videos, uploader) {
   if (!videos?.length) return;
   const cfg = settings.getNotify();
   if (!cfg.onUpload) return;
   const who = uploader?.name || '投递目录扫描';
   const space = videos[0].space === 'library' ? '素材库' : '每日选片';
   const base = publicBase();
-  const thumbs = base && videos.filter(v => v.thumb_path);
+  const probe = await probePublicBase(base);
+  if (base && !probe.ok) console.warn(`[notify] 公网地址不可达（${probe.reason}）：${base}；本次改发纯文字通知`);
+  const thumbs = probe.ok ? videos.filter(v => v.thumb_path) : [];
   const titleOf = v => v.title || v.orig_name || '未命名';
   const durOf = v => (v.duration ? ' ' + fmtDur(v.duration) : '');
 
@@ -202,7 +220,9 @@ function onUpload(videos, uploader) {
     return line + linkTxt + thumb;
   });
   const more = videos.length > 5 ? `\n…等共 ${videos.length} 条` : '';
-  const tip = base ? '' : '\n（配置「公网访问地址」后，钉钉群会直接显示封面缩略图卡片）';
+  const tip = !base
+    ? '\n（配置「公网访问地址」后，钉钉群会直接显示封面缩略图卡片）'
+    : (!probe.ok ? `\n（公网地址当前不可达：${base}（${probe.reason}）。已改发纯文字，请检查隧道或更新系统设置里的公网地址）` : '');
   const text = [
     plain ? '📥 素材入库' : '**📥 素材入库**',
     `${who} 新入库 ${videos.length} 条素材到「${space}」`,
@@ -245,4 +265,4 @@ async function sendTest() {
   }
 }
 
-module.exports = { TYPES, send, onUpload, onComment, sendTest, resolveMentions };
+module.exports = { TYPES, send, onUpload, onComment, sendTest, resolveMentions, probePublicBase };

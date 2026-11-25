@@ -1328,6 +1328,27 @@ function renderNotifyPanel(d) {
   enabledCb.checked = d.enabled !== false;
 
   const testChip = el('span', { class: 'pill' }, '未测试');
+  const healthChip = el('span', { class: 'pill' }, '公网地址：检测中…');
+  const runHealth = async () => {
+    healthChip.className = 'pill';
+    healthChip.textContent = '公网地址：检测中…';
+    try {
+      const h = await api('/settings/notify/health');
+      if (!h.publicBase) {
+        healthChip.textContent = '公网地址：未配置（通知只发文字，不会有缩略图）';
+      } else if (h.ok) {
+        healthChip.className = 'pill done';
+        healthChip.textContent = `公网地址可达：${h.publicBase}`;
+      } else {
+        healthChip.className = 'pill high';
+        healthChip.textContent = `公网地址不可达（${h.reason}）：${h.publicBase}。钉钉会收不到封面图`;
+      }
+    } catch (e) {
+      healthChip.className = 'pill high';
+      healthChip.textContent = '公网地址检测失败：' + e.message;
+    }
+  };
+  setTimeout(runHealth, 0);
   const runTest = async () => {
     testChip.textContent = '发送中…';
     testChip.className = 'pill';
@@ -1404,6 +1425,8 @@ function renderNotifyPanel(d) {
       el('p', { class: 'sethint' }, typeSel.value === 'dingtalk'
         ? '钉钉群里的图片由钉钉客户端从公网拉取，NAS 内网地址它打不开。填好公网域名（DDNS / 反向代理 / 内网穿透任一种，能访问本工作台即可），素材入库通知就会变成带封面缩略图的卡片。'
         : '钉钉缩略图卡片必须能公网访问本工作台；企业微信也会把封面图内嵌进消息。不填则发纯文字列表。'),
+      healthChip,
+      el('p', { class: 'sethint' }, '快速隧道重启会换域名，地址不可达时系统会改发纯文字通知，避免群里出现裂图。'),
     ),
     el('div', { class: 'field-row' },
       el('label', { class: 'setcheck' },

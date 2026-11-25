@@ -317,7 +317,12 @@ AI 接入走 OpenAI 兼容协议，默认指向 [grsai.com](https://grsai.com/) 
     cloudflare/cloudflared:latest tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8899
   docker logs tk-tunnel 2>&1 | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' | head -1
   ```
-  把打印出来的 `https://xxx.trycloudflare.com` 填进「公网访问地址」即可。快速隧道的域名在容器重启后会变，仓库里 `deploy/update-public-base.sh` 会从隧道日志里取最新地址并自动写回设置（可挂到群晖「任务计划」里开机跑一次）。
+  把打印出来的 `https://xxx.trycloudflare.com` 填进「公网访问地址」即可。
+
+  **隧道重启会换域名，这是裂图的头号原因。** v1.13.2 起有两层保护：
+
+  - 发通知前会探测公网地址是否可达；不可达就自动改发纯文字通知（并在消息里说明原因），不再往群里发裂图。设置页也会实时显示「公网地址可达 / 不可达」。
+  - `deploy/update-public-base.sh` 升级为一键自愈：隧道停了会先拉起，从日志取新域名、验证可达后写回设置，地址没变则直接跳过。建议挂到群晖「任务计划」每 10 分钟跑一次（`sudo sh /volume1/docker/tk/tk-selector/deploy/update-public-base.sh`）。
 - **公网地址怎么填**：钉钉 / 企微客户端要自己从公网拉图，NAS 内网地址（192.168.x.x）它们打不开。所以需要给工作台一个公网可达的地址：DDNS 域名、反向代理（Nginx / 群晖反代）、内网穿透（frp / cloudflared）任一种都行，填到「公网访问地址」即可。不填 = 只发文字列表（旧行为），不影响推送本身
 - 环境变量 `NOTIFY_*` 是出厂默认，界面保存过的项优先
 

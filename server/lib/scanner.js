@@ -105,7 +105,7 @@ async function scanNow({ reason = 'manual', uploaderId = null } = {}) {
       const trigger = uploaderId
         ? db.prepare('SELECT name FROM users WHERE id = ?').get(uploaderId)
         : null;
-      notify.onUpload(addedVideos, trigger);
+      notify.onUpload(addedVideos, trigger).catch(e => console.warn('[notify] 入库通知失败:', e.message));
     }
     state.lastResult = result;
     state.lastError = null;

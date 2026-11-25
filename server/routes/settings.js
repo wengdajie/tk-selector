@@ -104,6 +104,13 @@ r.get('/settings/notify', requireUser, (req, res) => {
   });
 });
 
+/** 公网地址体检：设置页用它在发通知前就发现裂图风险 */
+r.get('/settings/notify/health', requireUser, async (req, res) => {
+  const base = settings.getNotify().publicBase || '';
+  const probe = await notify.probePublicBase(base);
+  res.json({ publicBase: base, ...probe });
+});
+
 const NOTIFY_CHECKS = [
   ['notify_type', '机器人类型', v => notify.TYPES.includes(v), '只能是 wecom / feishu / dingtalk'],
   ['notify_url', 'Webhook 地址', v => /^https?:\/\/.+/.test(v) && v.length <= 500, '要以 http:// 或 https:// 开头'],

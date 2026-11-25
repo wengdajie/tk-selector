@@ -119,17 +119,27 @@ function deleteVideoCascade(v) {
   return { frameDirs: [...frameDirs], files: [v.file_path, v.thumb_path].filter(Boolean) };
 }
 
-/** 文件清理放在 DB 提交之后；失败不静默，返回残留清单 */
-function cleanupVideoFiles(v, plan) {
+/** 文件清理放在 DB 提交之后；瞬占（Windows 上 ffmpeg 还开着 fd）重试，失败不静默 */
+async function cleanupVideoFiles(v, plan) {
   const failed = [];
   for (const d of plan.frameDirs) {
     try { fs.rmSync(path.join(MEDIA_ROOT, 'frames', d), { recursive: true, force: true }); }
     catch (e) { failed.push(`frames/${d}`); console.error('[delete] 关键帧目录清理失败:', d, e.message); }
   }
   for (const rel of plan.files) {
-    try { fs.unlinkSync(safeMediaPath(rel)); }
-    catch (e) {
-      if (e.code !== 'ENOENT') { failed.push(rel); console.error('[delete] 文件清理失败:', rel, e.message); }
+    let done = false;
+    for (let i = 0; i < 5 && !done; i++) {
+      try { await fs.promises.unlink(safeMediaPath(rel)); done = true; }
+      catch (e) {
+        if (e.code === 'ENOENT') { done = true; break; }
+        const busy = e.code === 'EBUSY' || e.code === 'EPERM';
+        if (!busy || i === 4) {
+          failed.push(rel);
+          console.error('[delete] 文件清理失败:', rel, e.message);
+        } else {
+          await new Promise(r => setTimeout(r, 150 * (i + 1)));
+        }
+      }
     }
   }
   try { require('../lib/proxy').dropOne(v.id); }
@@ -353,7 +363,7 @@ r.post('/videos/upload', requireUser, (req, res) => {
       }
     }
     // 群通知：新素材入库（fire-and-forget，失败只记日志）
-    if (added.length) notify.onUpload(added, req.user);
+    if (added.length) notify.onUpload(added, req.user).catch(e => console.warn('[notify] 入库通知失败:', e.message));
     res.status(added.length ? 201 : 200).json({
       added: added.length, duplicates: duplicates.length, failed,
       items: added,
@@ -432,19 +442,19 @@ r.patch('/videos/:id', requireUser, (req, res) => {
   res.json({ video: shape(db.prepare(`${LIST_SELECT} WHERE v.id = ?`).get(v.id)) });
 });
 
-r.delete('/videos/:id', requireUser, (req, res) => {
+r.delete('/videos/:id', requireUser, async (req, res) => {
   const v = db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id);
   if (!v) return res.status(404).json({ error: '视频不存在' });
   if (!canMove(req.user, v)) return res.status(403).json({ error: '只有上传者或管理员可以删除' });
   let plan;
   try { db.transaction(() => { plan = deleteVideoCascade(v); })(); }
   catch (e) { return res.status(500).json({ error: '删除失败：' + (e.message || '未知错误') }); }
-  const failed = cleanupVideoFiles(v, plan);
+  const failed = await cleanupVideoFiles(v, plan);
   res.json({ ok: true, failedCleanup: failed });
 });
 
 /** 批量删除：与单条共用级联逻辑，全量预检后才动手，不存在「删一半」 */
-r.post('/videos/bulk-delete', requireUser, (req, res) => {
+r.post('/videos/bulk-delete', requireUser, async (req, res) => {
   const ids = normalizeIds(req.body?.ids);
   if (!ids.length) return res.status(400).json({ error: '未选择视频' });
   if (ids.length > MAX_BULK) return res.status(400).json({ error: `单次最多删除 ${MAX_BULK} 条` });
@@ -457,7 +467,10 @@ r.post('/videos/bulk-delete', requireUser, (req, res) => {
   try { db.transaction(() => { for (const v of rows) plans.push(deleteVideoCascade(v)); })(); }
   catch (e) { return res.status(500).json({ error: '批量删除失败：' + (e.message || '未知错误') }); }
   const failedCleanup = [];
-  rows.forEach((v, i) => failedCleanup.push(...cleanupVideoFiles(v, plans[i]).map(f => `${v.id}: ${f}`)));
+  for (let i = 0; i < rows.length; i++) {
+    const fails = await cleanupVideoFiles(rows[i], plans[i]);
+    failedCleanup.push(...fails.map(f => `${rows[i].id}: ${f}`));
+  }
   res.json({ ok: true, count: rows.length, failedCleanup });
 });
 
