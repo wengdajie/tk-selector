@@ -151,12 +151,13 @@ const streamUrl = (v, base) => base + '/api/videos/' + v.id + '/stream';
 async function probePublicBase(base) {
   if (!base) return { ok: false, reason: '未配置公网访问地址' };
   try {
-    const res = await fetch(base.replace(/\/+$/, '') + '/healthz', { signal: AbortSignal.timeout(2500) });
+    // 群晖容器冷启动首次 TLS 握手 + DNS 实测约 2.5s，2.5s 阈值会误判公网不可达
+    const res = await fetch(base.replace(/\/+$/, '') + '/healthz', { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
     await res.body?.cancel?.();
     return { ok: true };
   } catch (e) {
-    return { ok: false, reason: e?.name === 'TimeoutError' ? '探测超时（2.5s）' : (e?.message || '无法连接') };
+    return { ok: false, reason: e?.name === 'TimeoutError' ? '探测超时（8s）' : (e?.message || '无法连接') };
   }
 }
 
