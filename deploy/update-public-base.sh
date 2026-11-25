@@ -5,6 +5,9 @@
 # 用法：sudo sh update-public-base.sh
 # 建议：在 NAS 的计划任务里每 10 分钟跑一次（或隧道重启后手动跑一次）。
 set -e
+# 群晖 SSH / 任务计划这类非交互 shell 的 PATH 里没有 /usr/local/bin，docker 会找不到
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
 C=tk-selector
 T=tk-tunnel
 

@@ -783,6 +783,8 @@ const hGood = await call('/settings/notify/health', { uid });
 ok(hGood.status === 200 && hGood.data.ok === true, '健康探测能识别可达的公网地址');
 const notifySrc = fs.readFileSync(path.join(root, 'server', 'lib', 'notify.js'), 'utf8');
 ok(notifySrc.includes('AbortSignal.timeout(8000)'), '公网探测超时放宽到 8s，避免冷启动 TLS 误判', '');
+const selfHealSrc = fs.readFileSync(path.join(root, 'deploy', 'update-public-base.sh'), 'utf8');
+ok(selfHealSrc.includes('PATH=/usr/local/bin'), '自愈脚本兼容群晖非交互 shell（docker 不在 PATH）', '');
 
 console.log('\n== v1.9.1 钉钉链接：跳转地址 + 外部浏览器 ==');
 await call('/settings/notify', { method: 'PUT', uid, body: {
