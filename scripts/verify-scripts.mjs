@@ -684,6 +684,74 @@ const mkSample = (name, size, dur) => {
     '-i', `testsrc2=size=${size}:rate=24`, '-t', String(dur), '-pix_fmt', 'yuv420p', f]);
   return f;
 };
+/* ---- 原片完整性：上传 / 下载必须是同一份字节 ---- */
+console.log('\n== 原片完整性（不压缩、不转码） ==');
+const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex');
+const fileSha = f => sha256(fs.readFileSync(f));
+const integrityA = mkSample('integrity-a.mp4', '320x240', 1.1);
+const integrityB = mkSample('integrity-b.mp4', '320x240', 1.3);
+const hashA = fileSha(integrityA), hashB = fileSha(integrityB);
+
+const upIntegrity = async (file, name) => {
+  const fd = new FormData();
+  fd.append('files', new Blob([fs.readFileSync(file)], { type: 'video/mp4' }), name);
+  fd.append('space', 'library');
+  const res = await fetch(BASE + '/api/videos/upload', {
+    method: 'POST', headers: { 'x-user-id': uid }, body: fd,
+  });
+  return (await res.json()).items?.[0]?.id;
+};
+const mediaQuery = '?t=' + encodeURIComponent(mediaToken);
+const intIdA = await upIntegrity(integrityA, 'integrity-a.mp4');
+const intIdB = await upIntegrity(integrityB, 'integrity-b.mp4');
+ok(!!intIdA && !!intIdB, '原片完整性：两条素材上传成功');
+
+const intDetail = await call('/videos/' + intIdA, { uid });
+const intStored = path.join(env.DATA_DIR, 'media', intDetail.data.video.file_path);
+ok(fileSha(intStored) === hashA, '原片完整性：服务端原片字节 == 上传字节');
+ok(intDetail.data.video.size === fs.statSync(integrityA).size, '原片完整性：DB size 等于原始文件大小');
+
+const oneBatch = await call('/downloads', { method: 'POST', uid, body: { videoIds: [intIdA] } });
+const oneRes = await fetch(BASE + oneBatch.data.downloadUrl + mediaQuery);
+const oneBuf = Buffer.from(await oneRes.arrayBuffer());
+ok(oneRes.status === 200 && sha256(oneBuf) === hashA, '原片完整性：单文件下载字节 == 上传字节');
+
+const zipBatch = await call('/downloads', { method: 'POST', uid, body: { videoIds: [intIdA, intIdB] } });
+const zipRes = await fetch(BASE + zipBatch.data.downloadUrl + mediaQuery);
+const zipBuf = Buffer.from(await zipRes.arrayBuffer());
+ok(zipRes.status === 200 && zipBuf.readUInt32LE(0) === 0x04034b50, '原片完整性：批量下载返回合法 ZIP');
+// 读 ZIP 中央目录：method=0 表示 store（不压缩），csize 必须等于 usize
+let eocd = -1;
+for (let i = zipBuf.length - 22; i >= 0; i--) {
+  if (zipBuf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+}
+ok(eocd >= 0, '原片完整性：ZIP 中央目录可解析');
+const zipEntries = [];
+if (eocd >= 0) {
+  let off = zipBuf.readUInt32LE(eocd + 16);
+  const count = zipBuf.readUInt16LE(eocd + 10);
+  for (let i = 0; i < count && zipBuf.readUInt32LE(off) === 0x02014b50; i++) {
+    const method = zipBuf.readUInt16LE(off + 10);
+    const csize = zipBuf.readUInt32LE(off + 20);
+    const usize = zipBuf.readUInt32LE(off + 24);
+    const nameLen = zipBuf.readUInt16LE(off + 28);
+    const extraLen = zipBuf.readUInt16LE(off + 30);
+    const commentLen = zipBuf.readUInt16LE(off + 32);
+    const localOff = zipBuf.readUInt32LE(off + 42);
+    zipEntries.push({ method, csize, usize, localOff, nameLen, extraLen });
+    off += 46 + nameLen + extraLen + commentLen;
+  }
+}
+ok(zipEntries.length === 2, '原片完整性：ZIP 内含 2 个视频', String(zipEntries.length));
+ok(zipEntries.every(e => e.method === 0 && e.csize === e.usize), '原片完整性：ZIP 采用 store 模式，未二次压缩');
+if (zipEntries.length === 2) {
+  const extracted = zipEntries.map(e => {
+    const start = e.localOff + 30 + zipBuf.readUInt16LE(e.localOff + 26) + zipBuf.readUInt16LE(e.localOff + 28);
+    return sha256(zipBuf.subarray(start, start + e.usize));
+  }).sort();
+  ok(JSON.stringify(extracted) === JSON.stringify([hashA, hashB].sort()), '原片完整性：ZIP 解出的字节 == 上传字节');
+}
+
 const libSample = mkSample('qc-lib.mp4', '320x240', 1.2);
 const thumbSample = mkSample('qc-thumb.mp4', '360x640', 1.5);
 const plainSample = mkSample('qc-plain.mp4', '400x400', 1.8);
